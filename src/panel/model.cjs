@@ -85,6 +85,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     autoContinueOnProviderError: config.autoContinueOnProviderError === true,
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
     upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
+    autoByok: config.autoByok === true,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
   };
 }
@@ -273,6 +274,7 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
+      case 'setAutoByok': config.autoByok = boolean(payload.enabled, 'Auto-BYOK'); break;
       case 'setUpstreamRetries': {
         const count = payload.count;
         if (!Number.isSafeInteger(count) || count < 0 || count > 100) fail('重试次数必须是 0 到 100 之间的整数。');

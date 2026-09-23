@@ -484,7 +484,21 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '有未完成待办时自动继续' }),
-          element('span', { class: 'hint', text: '当检测到会话中有未完成的结构化待办列表（Plan）时自动发送 continue 推动执行，直到全部待办完成。无待办或非结构化计划时不会自动循环，随时可通过停止或权限拦截打断。' }))));
+          element('span', { class: 'hint', text: '当检测到会话中有未完成的结构化待办列表（Plan）时自动发送 continue 推动执行，直到全部待办完成。无待办或非结构化计划时不会自动循环，随时可通过停止或权限拦截打断。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'checkbox',
+          checked: state.autoByok === true,
+          disabled: state.enabled === false,
+          onchange: event => {
+            const checked = event.target.checked;
+            run(() => request('setAutoByok', { enabled: checked }), checked ? '正在开启 Auto-BYOK…' : '正在关闭 Auto-BYOK…')
+              .then(ok => { if (!ok) event.target.checked = !checked; });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '同名模型自动走我的供应商（Auto-BYOK）' }),
+          element('span', { class: 'hint', text: '开启后，所选官方/内置模型会按 uid 匹配任一已启用供应商中的模型 ID：先精确匹配（如 glm-5-2），再剥离档位后缀匹配基础模型并透传该档位（如 gpt-5-6-sol-high → gpt-5-6-sol + high，-priority/-fast 变体同样可命中）。匹配时把 . 视作 -（供应商写 gpt-5.6-sol 也能命中），但代号段（sol/luna 等）必须一致。对内置 Fusion 解析出的 Lead/Sidekick 调用同样生效。仅匹配已启用模型；不匹配时仍走官方。' }))));
     autoContinueSection.append(element('p', { class: 'hint', text: state.autoContinueStatus === 'attached'
       ? '自动继续已接入本地会话连接；开关只影响之后发生的失败与待办。'
       : state.autoContinueStatus === 'waiting' ? '等待本地会话连接；请重新加载窗口并新建会话。'

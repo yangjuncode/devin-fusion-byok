@@ -20,6 +20,40 @@ function upstreamRetries(current) {
   return Number.isSafeInteger(current?.upstreamRetries) && current.upstreamRetries >= 0
     ? Math.min(current.upstreamRetries, 100) : DEFAULT_UPSTREAM_RETRIES;
 }
+// auto-byok：官方模型 uid 与任一已启用供应商中的模型 ID 完全一致时，
+// 把该请求改走自有上游；对内置 Fusion 解析出的 Lead/Sidekick 调用同样生效。
+const AUTO_BYOK_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+// 官方 uid 形如 gpt-5-6-sol-high / gpt-5-6-luna-high-priority：
+// 尾部 -priority/-fast 是 Fast Mode 变体（不向上游透传），上一段是推理档位。
+// 供应商常把版本写作 gpt-5.6-sol，比较时把 . 统一视作 -（仅归一化分隔符，代号段仍需一致）。
+const normId = id => id.replace(/\./gu, '-');
+function splitNativeUid(uid) {
+  const base = normId(uid).replace(/-(?:priority|fast)$/u, '');
+  const marker = base.lastIndexOf('-');
+  if (marker > 0 && AUTO_BYOK_EFFORTS.has(base.slice(marker + 1))) {
+    return { model: base.slice(0, marker), effort: base.slice(marker + 1) };
+  }
+  return { model: base, effort: undefined };
+}
+function autoByokRoute(current, chat) {
+  if (current.autoByok !== true || typeof chat?.modelUid !== 'string' || !chat.modelUid) return undefined;
+  const uid = normId(chat.modelUid);
+  const { model: baseId, effort } = splitNativeUid(chat.modelUid);
+  const enabled = provider => provider && provider.enabled !== false && typeof provider.id === 'string' && provider.id;
+  const models = provider => (Array.isArray(provider.models) ? provider.models : []).filter(item => item && item.enabled !== false);
+  const providers = (Array.isArray(current.providers) ? current.providers : []).filter(enabled);
+  const found = providers.flatMap(provider => models(provider).map(model => ({ provider, model })))
+    .find(({ model }) => normId(model.id) === uid)
+    ?? providers.flatMap(provider => models(provider).map(model => ({ provider, model })))
+      .find(({ model }) => baseId !== uid && normId(model.id) === baseId);
+  if (!found) return undefined;
+  const contextWindow = Number.isSafeInteger(found.model.contextWindow) && found.model.contextWindow > 0 ? found.model.contextWindow : 272000;
+  const maxOutputTokens = Number.isSafeInteger(found.model.maxOutputTokens) && found.model.maxOutputTokens > 0
+    ? Math.min(found.model.maxOutputTokens, contextWindow) : undefined;
+  // 精确命中时 id 自带变体语义，effort 留空用供应商默认；后缀命中时透传请求档位。
+  return { uid: chat.modelUid, providerId: found.provider.id, model: found.model.id,
+    effort: normId(found.model.id) === uid ? undefined : effort, maxOutputTokens };
+}
 const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
 function sourceId() {
   const hash = crypto.createHash('sha256');
@@ -117,7 +151,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
         }
       } else {
         const chat = parseChat(format.data);
-        const route = Object.hasOwn(catalog.routes, chat.modelUid) ? catalog.routes[chat.modelUid] : undefined;
+        const route = Object.hasOwn(catalog.routes, chat.modelUid) ? catalog.routes[chat.modelUid] : autoByokRoute(current, chat);
         if (route) {
           const provider = current.providers.find(p => p.id === route.providerId);
           if (!provider) throw new Error('Provider missing');

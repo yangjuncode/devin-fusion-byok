@@ -145,6 +145,62 @@ test('disabled configuration forwards even an otherwise valid custom model to th
   assert.deepEqual(f.chats, []);
 });
 
+test('auto-byok routes a native uid matching an enabled provider model id', async t => {
+  const f = await fixture(t);
+  const body = JSON.stringify({ modelUid: 'model', messages: [] });
+  // 关闭时：uid 即使与供应商模型 ID 相同也照常走官方
+  let response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(await response.text(), 'official');
+  assert.deepEqual(f.chats, []);
+
+  f.config.autoByok = true;
+  f.config.providers[0].models.push({ id: 'gpt-5.6-sol', label: 'Sol' });
+  fs.writeFileSync(path.join(f.root, 'config.json'), JSON.stringify(f.config));
+  response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(await response.text(), 'custom');
+  assert.equal(f.chats.length, 1);
+  assert.equal(f.chats[0].uid, 'model');
+  assert.equal(f.chats[0].model, 'model');
+  assert.equal(f.chats[0].providerId, 'test');
+  assert.equal(f.chats[0].effort, undefined);
+
+  // 官方 uid 的档位后缀剥离后命中基础模型，effort 按请求透传
+  for (const [uid, effort] of [['model-high', 'high'], ['model-xhigh-priority', 'xhigh'], ['model-medium-fast', 'medium']]) {
+    response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelUid: uid, messages: [] }) });
+    assert.equal(await response.text(), 'custom', uid);
+    assert.equal(f.chats.at(-1).model, 'model');
+    assert.equal(f.chats.at(-1).effort, effort, uid);
+  }
+
+  // 供应商 id 用 . 作分隔符时同样命中：gpt-5-6-sol-high → gpt-5.6-sol + high
+  for (const [uid, effort] of [['gpt-5-6-sol', undefined], ['gpt-5-6-sol-high', 'high'], ['gpt-5-6-sol-medium-priority', 'medium']]) {
+    response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelUid: uid, messages: [] }) });
+    assert.equal(await response.text(), 'custom', uid);
+    assert.equal(f.chats.at(-1).model, 'gpt-5.6-sol');
+    assert.equal(f.chats.at(-1).effort, effort, uid);
+  }
+
+  // 代号段不一致不命中（. 归一化不允许忽略 sol/luna 等差异）
+  response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modelUid: 'gpt-5-6-luna-high', messages: [] }) });
+  assert.equal(await response.text(), 'official');
+
+  // 不匹配的 uid 仍然走官方
+  response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modelUid: 'no-such-model', messages: [] }) });
+  assert.equal(await response.text(), 'official');
+  assert.equal(f.chats.length, 7);
+
+  // 模型停用后不再接管
+  f.config.providers[0].models[0].enabled = false;
+  fs.writeFileSync(path.join(f.root, 'config.json'), JSON.stringify(f.config));
+  response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(await response.text(), 'official');
+  assert.equal(f.chats.length, 7);
+});
+
 test('known custom model requests use their exact provider route', async t => {
   const f = await fixture(t);
   const modelUid = Object.keys(buildCatalog(f.config).routes)[0];
