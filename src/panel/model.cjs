@@ -1,6 +1,6 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
-const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig } = require('../catalog.cjs');
+const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig, DEFAULT_NATIVE_MODEL_FILTER, matchesNativeFilter } = require('../catalog.cjs');
 const { discover: discoverModels } = require('../config.cjs');
 const { modelSupportsImages } = require('../model-capabilities.cjs');
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -58,6 +58,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     observed.add(entry.uid);
     natives.push({ uid: entry.uid, label: typeof entry.label === 'string' && entry.label ? entry.label : entry.uid,
       disabled: entry.disabled === true, hidden: hidden.has(entry.uid),
+      filtered: matchesNativeFilter(entry.uid, catalog.nativeFilterTerms),
       eligibleLead: eligibleLeads.has(entry.uid), eligibleSidekick: eligibleSidekicks.has(entry.uid),
       eligible: eligibleLeads.has(entry.uid) || eligibleSidekicks.has(entry.uid) });
   }
@@ -86,6 +87,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
     upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
     autoByok: config.autoByok === true,
+    nativeModelFilter: typeof config.nativeModelFilter === 'string' ? config.nativeModelFilter : DEFAULT_NATIVE_MODEL_FILTER,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
   };
 }
@@ -275,6 +277,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
       case 'setAutoByok': config.autoByok = boolean(payload.enabled, 'Auto-BYOK'); break;
+      case 'setNativeModelFilter': {
+        const value = payload.value;
+        if (typeof value !== 'string' || value.length > 2000 || /[\u0000-\u001f]/.test(value)) fail('过滤条件无效。');
+        config.nativeModelFilter = value;
+        break;
+      }
       case 'setUpstreamRetries': {
         const count = payload.count;
         if (!Number.isSafeInteger(count) || count < 0 || count > 100) fail('重试次数必须是 0 到 100 之间的整数。');

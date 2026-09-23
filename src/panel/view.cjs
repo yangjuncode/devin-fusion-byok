@@ -577,6 +577,17 @@ function panelClient(modelSupportsImages, vscode) {
     search.value = nativeSearch;
     container.append(element('div', { class: 'toolbar' }, search, element('button', { type: 'button', text: '刷新官方模型',
       onclick: () => run(() => request('refreshNativeModels'), '正在同步官方模型…') })));
+    const filterInput = element('input', { type: 'text', class: 'search', placeholder: '过滤条件，用 ; 分隔',
+      'aria-label': '官方模型过滤条件', value: state.nativeModelFilter ?? '',
+      disabled: state.enabled === false,
+      onchange: event => {
+        const value = event.target.value;
+        run(() => request('setNativeModelFilter', { value }), '正在保存过滤条件…')
+          .then(ok => { if (!ok) event.target.value = state.nativeModelFilter ?? ''; });
+      }
+    });
+    container.append(element('div', { class: 'toolbar' }, filterInput));
+    container.append(element('p', { class: 'hint section-hint', text: '过滤：分号分隔的子串条件，命中的官方模型（含 Fast/Fusion 变体）从 Devin 模型选择器中移除，. 与空格视作 -，如 opus-4-6;gemini-3-5;glm。清空表示不过滤；保存后等 Devin 刷新列表生效，不影响请求路由。' }));
     container.append(element('p', { class: 'hint section-hint', text: '移除只在本机模型列表中隐藏，不影响官方账号和权限；加回后等 Devin 刷新列表即可恢复。符合条件的官方模型会显示为预设候选；保存预设后才会生成组合，实际可用性取决于账号返回的模型目录。' }));
     container.append(element('div', { id: 'native-list', class: 'model-list', 'aria-label': '官方模型列表' }));
     renderNativeRows();
@@ -605,6 +616,7 @@ function panelClient(modelSupportsImages, vscode) {
         }
       });
       const status = model.hidden ? '已移除'
+        : model.filtered ? '已过滤'
         : model.disabled ? '显示中 · 官方不可用'
         : model.eligible === true ? '显示中 · 可作 Lead / Sidekick'
         : '显示中 · 缺少支持的执行通道';

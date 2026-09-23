@@ -254,6 +254,7 @@ test('nativeLead + BYOK sidekick assignment executes exact UID and declared lead
 test('official catalog filters disabled official combos and combos whose lead/sidekick was excluded', () => {
   const config = {
     enabled: true,
+    nativeModelFilter: '',
     providers: [
       { id: 'p1', name: 'OpenAI', enabled: true, baseUrl: 'https://p1.test', apiKey: 'k', apiFormat: 'openai', models: [{ id: 'm1', label: 'M1', enabled: true }] }
     ],
@@ -321,6 +322,7 @@ test('team allowlist for nativeLead requires native.has(leadUid)', () => {
 test('nativeLead and official fusion exclusion filters fast mode variants and preserves plain native', () => {
   const config = {
     enabled: true,
+    nativeModelFilter: '',
     providers: [],
     roleExclusions: {
       lead: [{ nativeUid: 'claude-fable-5-1-medium' }],

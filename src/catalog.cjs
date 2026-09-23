@@ -12,6 +12,20 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)
 const slug = value => String(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'model';
 const concat = parts => Buffer.concat(parts);
 const positive = (value, fallback) => Number.isSafeInteger(value) && value > 0 && value <= 2147483647 ? value : fallback;
+
+// 官方模型过滤：分号分隔的子串条件，归一化后命中 uid 即从选择器列表移除（不影响请求路由与观察上报）。
+// 缺省用默认条件；显式置空字符串表示不过滤。priority 是官方 Fast Mode 单模型的 uid 后缀，fusion 预设内用 -fast。
+const DEFAULT_NATIVE_MODEL_FILTER = 'fast;priority;opus-4-6;opus-4-7;opus-4-8;opus-5-0;fable-5;gemini-3-5;gemini-3-6;gemini-3-8;glm;kimi';
+const normalizeFilterText = value => String(value).toLowerCase().replace(/[.\s_]+/gu, '-');
+function nativeFilterTerms(value) {
+  const text = typeof value === 'string' ? value : value == null ? DEFAULT_NATIVE_MODEL_FILTER : '';
+  return [...new Set(text.split(';').map(term => normalizeFilterText(term.trim())).filter(Boolean))];
+}
+function matchesNativeFilter(uid, terms) {
+  if (typeof uid !== 'string' || !uid || ownUid(uid)) return false;
+  const normalized = normalizeFilterText(uid);
+  return (Array.isArray(terms) ? terms : []).some(term => normalized.includes(term));
+}
 function refKey(ref) {
   if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return '';
   const hasNative = typeof ref.nativeUid === 'string' && ref.nativeUid.length > 0 && ref.nativeUid.length <= 256 && !ownUid(ref.nativeUid);
@@ -463,7 +477,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
 /** Build a secret-free catalog. Provider credentials stay solely in caller configuration. */
 function buildCatalog(config = {}, nativeModels = []) {
   if (config.enabled === false) {
-    return { models: [], routes: {}, fusions: {}, sidekicks: [], hiddenNativeModelUids: [], hiddenFusionUids: [] };
+    return { models: [], routes: {}, fusions: {}, sidekicks: [], hiddenNativeModelUids: [], hiddenFusionUids: [], nativeFilterTerms: [] };
   }
   const models = [], routes = {}, fusions = {}, leads = [];
   const inferenceServerUrl = config.inferenceServerUrl || 'https://server.codeium.com';
@@ -633,6 +647,7 @@ function buildCatalog(config = {}, nativeModels = []) {
       ...(sidekick.native ? { sidekickHarnessUids: sidekick.harnessUids } : {}) };
   }
   return { models: [...presetModels, ...models], routes, fusions, sidekicks, hiddenNativeModelUids, hiddenFusionUids,
+    nativeFilterTerms: nativeFilterTerms(config.nativeModelFilter),
     presetStates, savedPresets, migratedFrom,
     migrationPending: !Object.hasOwn(config, 'fusionPresets') && !!config.defaultFusionUid && !migratedFrom,
     presetCandidates: Object.fromEntries(Object.entries(candidates).map(([role, items]) => [role, items.map(item => ({ ref: item.ref, label: item.label }))])),
@@ -892,6 +907,7 @@ function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNati
   reportNativeModels(entries, false, onNativeModels);
   const hiddenNative = new Set(catalog.hiddenNativeModelUids || []);
   const hiddenFusion = new Set(catalog.hiddenFusionUids || []);
+  const filterTerms = catalog.nativeFilterTerms;
   const retainedLabels = new Set(models.map(model => model.label));
   const hiddenLabels = new Set();
   const preserved = [];
@@ -899,8 +915,7 @@ function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNati
     if (field.number === 1 && field.wire === 2) {
       const uid = protoUid(field.value), label = str(field.value, 1);
       if (ownUid(uid)) { existingLabels.add(label); continue; }
-      if (hiddenNative.has(uid)) { if (label) hiddenLabels.add(label); continue; }
-      if (hiddenFusion.has(uid)) { if (label) hiddenLabels.add(label); continue; }
+      if (hiddenNative.has(uid) || hiddenFusion.has(uid) || matchesNativeFilter(uid, filterTerms)) { if (label) hiddenLabels.add(label); continue; }
       retainedLabels.add(label);
     }
     preserved.push(field);
@@ -954,6 +969,7 @@ function augmentJsonList(data, catalog, hasSorts = true, onFusionStatus, onNativ
   reportNativeModels(existing, true, onNativeModels);
   const hiddenNative = new Set(catalog.hiddenNativeModelUids || []);
   const hiddenFusion = new Set(catalog.hiddenFusionUids || []);
+  const filterTerms = catalog.nativeFilterTerms;
   const labels = models.map(model => model.label), existingLabels = new Set(labels);
   const retainedLabels = new Set(labels);
   const hiddenLabels = new Set();
@@ -961,8 +977,7 @@ function augmentJsonList(data, catalog, hasSorts = true, onFusionStatus, onNativ
   for (const model of existing) {
     const uid = nativeUid(model);
     if (ownUid(uid)) { existingLabels.add(model?.label); continue; }
-    if (hiddenNative.has(uid)) { if (typeof model.label === 'string') hiddenLabels.add(model.label); continue; }
-    if (hiddenFusion.has(uid)) { if (typeof model.label === 'string') hiddenLabels.add(model.label); continue; }
+    if (hiddenNative.has(uid) || hiddenFusion.has(uid) || matchesNativeFilter(uid, filterTerms)) { if (typeof model.label === 'string') hiddenLabels.add(model.label); continue; }
     if (typeof model?.label === 'string') retainedLabels.add(model.label);
     kept.push(model);
   }
@@ -988,7 +1003,7 @@ function augmentCatalog(data, { rpc, format = {}, catalog, onFusionStatus, onNat
   const shape = rpcShape(rpc);
   if (!shape || !catalog) return data;
   if (!catalog.models?.length && !catalog.hiddenNativeModelUids?.length && !catalog.hiddenFusionUids?.length &&
-      typeof onFusionStatus !== 'function' && typeof onNativeModels !== 'function') return data;
+      !catalog.nativeFilterTerms?.length && typeof onFusionStatus !== 'function' && typeof onNativeModels !== 'function') return data;
   try {
     if (format.json === true) {
       if (!shape.status) return augmentJsonList(data, catalog, shape.sorts, onFusionStatus, onNativeModels);
@@ -1112,4 +1127,5 @@ function resolveAssignment(data, format = {}, catalog, lockedFusionUids) {
   } catch { return null; }
 }
 
-module.exports = { buildCatalog, augmentCatalog, resolveAssignment, collectNativeModels, buildRoleLists, refKey, presetUid, normalizeFusionConfig };
+module.exports = { buildCatalog, augmentCatalog, resolveAssignment, collectNativeModels, buildRoleLists, refKey, presetUid, normalizeFusionConfig,
+  DEFAULT_NATIVE_MODEL_FILTER, nativeFilterTerms, matchesNativeFilter };

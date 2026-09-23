@@ -4,7 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { buildCatalog: buildSavedCatalog, augmentCatalog, resolveAssignment, collectNativeModels } = require('../src/catalog.cjs');
+const { buildCatalog: buildSavedCatalog, augmentCatalog, resolveAssignment, collectNativeModels,
+  nativeFilterTerms, matchesNativeFilter, DEFAULT_NATIVE_MODEL_FILTER } = require('../src/catalog.cjs');
 const { withPresets } = require('./fixtures/presets.cjs');
 const buildCatalog = (config = {}, natives = []) => buildSavedCatalog(withPresets(config, natives), natives);
 const { fields, str, num, s, v, m } = require('../src/protocol/wire.cjs');
@@ -227,7 +228,7 @@ test('JSON CLI only appends models and leaves official defaults and extras intac
 test('unknown RPCs, empty catalogs, missing user status and malformed responses are unchanged', () => {
   const input = statusFixture().body;
   assert.equal(augmentCatalog(input, { rpc: 'GetAccount', format: proto, catalog }), input);
-  assert.equal(augmentCatalog(input, { rpc: lsStatus, format: proto, catalog: buildCatalog() }), input);
+  assert.equal(augmentCatalog(input, { rpc: lsStatus, format: proto, catalog: buildCatalog({ nativeModelFilter: '' }) }), input);
   for (const invalid of [Buffer.from([0x0a, 0xff]), cat(m(1, Buffer.alloc(0)), m(1, Buffer.alloc(0))), v(1, 1), s(2, 'unrelated')]) {
     assert.equal(augmentCatalog(invalid, { rpc: lsStatus, format: proto, catalog }), invalid);
   }
@@ -459,6 +460,45 @@ test('hidden official uids are removed from JSON lists including snake_case alia
   assert.equal(groups[0].groupName, '我的 Fusion');
   assert.deepEqual(groups[2].model_labels, ['Shared Label', 'Fusion (Open)']);
   assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: json, catalog: withHidden }), output);
+});
+
+test('native model filter removes matching uids from proto and JSON lists while observation still reports them', () => {
+  const filtered = { ...catalog, nativeFilterTerms: nativeFilterTerms('fable-5; swe-2-max') };
+  const fable = cat(s(1, 'Fable'), s(22, 'claude-fable-5-1-medium'));
+  const fusionFast = cat(s(1, 'Fast Combo'), s(22, 'fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-luna-high-priority'));
+  const hidden = cat(s(1, 'SWE Max'), s(22, 'swe-2-max'));
+  const kept = cat(s(1, 'SWE High'), s(22, 'swe-2-high'));
+  const sort = cat(s(1, 'Recommended'), m(2, cat(s(1, 'Official'), s(2, 'Fable'), s(2, 'Fast Combo'), s(2, 'SWE Max'), s(2, 'SWE High'))));
+  const input = cat(m(1, fable), m(1, fusionFast), m(1, hidden), m(1, kept), m(2, sort));
+  let report;
+  const output = augmentCatalog(input, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: filtered, onNativeModels: entries => { report = entries; } });
+  assert.deepEqual(configs(output).map(entry => str(entry, 22)), [...catalog.models.map(model => model.uid), 'swe-2-high']);
+  assert.deepEqual(report.map(entry => entry.uid), ['claude-fable-5-1-medium', 'fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-luna-high-priority', 'swe-2-max', 'swe-2-high']);
+  const group = fields(getNested(output, 2), 2).at(-1);
+  assert.deepEqual(fields(group.value, 2).map(field => field.value.toString()), ['SWE High']);
+  assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: filtered }), output);
+
+  const jsonOut = augmentCatalog({ clientModelConfigs: [
+    { modelUid: 'claude-fable-5-1-medium', label: 'Fable' },
+    { modelUid: 'GPT-5.6-Luna-High', label: 'Luna' },
+    { modelUid: 'swe-2-high', label: 'SWE High' }], clientModelSorts: [] },
+    { rpc: 'GetCliModelConfigs', format: json, catalog: { ...catalog, nativeFilterTerms: nativeFilterTerms('fable 5;gpt-5.6-luna') } });
+  assert.deepEqual(jsonOut.clientModelConfigs.map(entry => entry.modelUid), [...catalog.models.map(model => model.uid), 'swe-2-high']);
+});
+
+test('native model filter defaults cover fast, opus, fable, gemini, glm and kimi; empty disables', () => {
+  const def = buildSavedCatalog({ providers: [], sidekicks: [] });
+  assert.deepEqual(def.nativeFilterTerms, nativeFilterTerms(DEFAULT_NATIVE_MODEL_FILTER));
+  assert.deepEqual(nativeFilterTerms('a;; B . c_ d'), ['a', 'b-c-d']);
+  assert.deepEqual(nativeFilterTerms(''), []);
+  for (const uid of ['gpt-5-6-sol-high-priority', 'fusion-gpt-5-6-sol-high-fast-sidekick-glm-5-2', 'claude-opus-4-6',
+    'claude-opus-4-7-medium', 'claude-opus-4-8', 'claude-opus-5-0-high', 'claude-fable-5-1-medium',
+    'gemini-3-5-pro', 'gemini-3-6', 'gemini-3-8-flash', 'glm-5-2', 'kimi-k2'])
+    assert.ok(matchesNativeFilter(uid, def.nativeFilterTerms), uid);
+  for (const uid of ['swe-2-max', 'swe-2-high', 'gpt-5-6-sol-high', 'gpt-5-6-luna-high', 'claude-opus-4-5', 'gemini-3-9', 'adaptive', 'dfbyok-own-x'])
+    assert.ok(!matchesNativeFilter(uid, def.nativeFilterTerms), uid);
+  const disabled = buildSavedCatalog({ providers: [], sidekicks: [], nativeModelFilter: '' });
+  assert.deepEqual(disabled.nativeFilterTerms, []);
 });
 
 test('hidden filtering and native observation work with an empty own catalog', () => {

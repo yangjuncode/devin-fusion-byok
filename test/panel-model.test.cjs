@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createManager, publicState, cleanSidekicks, PanelInputError } = require('../src/panel/model.cjs');
-const { buildCatalog } = require('../src/catalog.cjs');
+const { buildCatalog, DEFAULT_NATIVE_MODEL_FILTER } = require('../src/catalog.cjs');
 
 const nativeSidekick = { nativeUid: 'swe-2-max', label: 'SWE-2 Max' };
 const OBSERVED_SWE = [
@@ -388,8 +388,8 @@ test('native model hide and restore persist a validated exclusion list with obse
   const f = memory({ nativeModels: () => observed });
   let state = await f.manager.dispatch('ready');
   assert.deepEqual(state.nativeModels, [
-    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
-    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
+    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, filtered: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
+    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, filtered: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
   ]);
   state = await f.manager.dispatch('setNativeModelHidden', { uid: 'swe-2-max', hidden: true });
   assert.deepEqual(f.read().hiddenNativeModelUids, ['swe-2-max']);
@@ -399,6 +399,26 @@ test('native model hide and restore persist a validated exclusion list with obse
   state = await f.manager.dispatch('setNativeModelHidden', { uid: 'swe-2-max', hidden: false });
   assert.deepEqual(f.read().hiddenNativeModelUids, []);
   assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-2-max').hidden, false);
+});
+
+test('native model filter persists raw text, defaults to the built-in list and flags filtered rows', async () => {
+  const observed = [
+    { uid: 'claude-fable-5-1-medium', label: 'Fable', disabled: false },
+    { uid: 'swe-2-max', label: 'Official SWE', disabled: false },
+  ];
+  const f = memory({ nativeModels: () => observed });
+  let state = await f.manager.dispatch('ready');
+  assert.equal(state.nativeModelFilter, DEFAULT_NATIVE_MODEL_FILTER);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'claude-fable-5-1-medium').filtered, true);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-2-max').filtered, false);
+  state = await f.manager.dispatch('setNativeModelFilter', { value: 'kimi;glm' });
+  assert.equal(f.read().nativeModelFilter, 'kimi;glm');
+  assert.equal(state.nativeModelFilter, 'kimi;glm');
+  assert.ok(state.nativeModels.every(entry => entry.filtered === false));
+  state = await f.manager.dispatch('setNativeModelFilter', { value: '' });
+  assert.equal(state.nativeModelFilter, '');
+  await assert.rejects(f.manager.dispatch('setNativeModelFilter', { value: 42 }));
+  assert.equal(f.read().nativeModelFilter, '');
 });
 
 test('native visibility rejects unobserved, own and malformed uids and non-boolean flags without writes', async () => {
