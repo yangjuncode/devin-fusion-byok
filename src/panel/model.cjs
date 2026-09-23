@@ -65,7 +65,8 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
   return {
     enabled: config.enabled !== false,
     providers: config.providers.map(provider => ({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl,
-      apiFormat: provider.apiFormat, enabled: provider.enabled !== false, keyConfigured: !!provider.apiKey,
+      apiFormat: provider.apiFormat, codexUnlock: provider.unlockKind === 'codex',
+      enabled: provider.enabled !== false, keyConfigured: !!provider.apiKey,
       models: provider.models.map(model => ({ id: model.id, label: model.label || model.id, enabled: model.enabled !== false,
         efforts: model.efforts || [], effortMode: model.effortMode || (model.efforts?.length ? 'manual' : 'auto'),
         contextWindow: model.contextWindow || 272000, maxOutputTokens: model.maxOutputTokens || 16384,
@@ -144,13 +145,16 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         const existing = payload.id ? providerAt(config, payload.id) : null;
         const name = text(payload.name, '供应商名称', 80), url = baseUrl(payload.baseUrl);
         if (!['openai-responses', 'openai'].includes(payload.apiFormat)) fail('请选择 Responses 或 Chat Completions。');
+        if (own(payload, 'codexUnlock')) boolean(payload.codexUnlock, 'Codex 专线');
         if (own(payload, 'apiKey') && (typeof payload.apiKey !== 'string' || payload.apiKey.length > 8192 || /[\r\n]/.test(payload.apiKey))) fail('API Key 无效。');
         const apiKey = payload.apiKey?.trim() || existing?.apiKey || '';
+        const codexUnlock = own(payload, 'codexUnlock') ? payload.codexUnlock === true : existing?.unlockKind === 'codex';
         if (existing) {
           const previousName = existing.name;
           Object.assign(existing, { name, baseUrl: url, apiFormat: payload.apiFormat, apiKey });
+          if (codexUnlock) existing.unlockKind = 'codex'; else delete existing.unlockKind;
           if (name !== previousName) for (const model of existing.models) if (model.label?.startsWith(previousName + ' · ')) model.label = name + model.label.slice(previousName.length);
-        } else config.providers.push({ id: 'provider-' + randomUUID(), name, baseUrl: url, apiFormat: payload.apiFormat, apiKey, enabled: true, models: [] });
+        } else config.providers.push({ id: 'provider-' + randomUUID(), name, baseUrl: url, apiFormat: payload.apiFormat, apiKey, enabled: true, models: [], ...(codexUnlock ? { unlockKind: 'codex' } : {}) });
         break;
       }
       case 'deleteProvider': providerAt(config, payload.id); config.providers = config.providers.filter(p => p.id !== payload.id); break;

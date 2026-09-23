@@ -344,7 +344,7 @@ function panelClient(modelSupportsImages, vscode) {
     });
     container.append(element('div', { class: 'provider-summary' }, element('div', {},
       element('h3', { text: provider.name }), element('p', { class: 'endpoint', text: provider.baseUrl }),
-      element('p', { class: 'hint', text: (provider.apiFormat === 'openai-responses' ? 'Responses API' : 'Chat Completions API') + ' · ' + (provider.keyConfigured ? '已配置密钥' : '未配置密钥') })),
+      element('p', { class: 'hint', text: (provider.apiFormat === 'openai-responses' ? 'Responses API' : 'Chat Completions API') + (provider.codexUnlock ? ' · Codex 专线' : '') + ' · ' + (provider.keyConfigured ? '已配置密钥' : '未配置密钥') })),
       element('div', { class: 'actions' }, element('label', { class: 'toggle' }, enabled, '启用'),
         button('编辑', () => providerDialog(provider)), button('删除', () => deleteProvider(provider)))));
     if (provider.enabled === false) container.append(element('p', { class: 'subtle-warning', text: '此供应商已停用，其模型不会显示在新会话中。' }));
@@ -706,11 +706,15 @@ function panelClient(modelSupportsImages, vscode) {
       element('option', { value: 'openai-responses', text: 'OpenAI Responses' }),
       element('option', { value: 'openai', text: 'OpenAI Chat Completions' }));
     apiFormat.value = provider?.apiFormat || 'openai-responses';
+    const codexUnlock = element('input', { type: 'checkbox', checked: provider?.codexUnlock === true });
     const apiKey = input('', { type: 'password', autocomplete: 'new-password', placeholder: provider?.keyConfigured ? '留空保留现有密钥' : '输入 API Key', spellcheck: 'false' });
     form.append(field('名称', name), field('API 地址', baseUrl, '填写供应商的 API 基础地址，通常以 /v1 结尾。'),
-      field('API 类型', apiFormat), field('API Key', apiKey, provider?.keyConfigured ? '现有密钥不会在面板中显示。仅在需要替换时填写。' : '密钥保存在此电脑的插件配置中，不会显示在模型列表里。'));
+      field('API 类型', apiFormat),
+      element('div', { class: 'dialog-options field' }, element('label', { class: 'toggle' }, codexUnlock, 'Codex 专线')),
+      element('p', { class: 'hint', text: '仅 cliproxyapi 等 Codex 网关渠道需要：始终走 Responses 契约并注入 Lite 身份头与必需字段，普通渠道请勿开启。' }),
+      field('API Key', apiKey, provider?.keyConfigured ? '现有密钥不会在面板中显示。仅在需要替换时填写。' : '密钥保存在此电脑的插件配置中，不会显示在模型列表里。'));
     finishDialog(dialog, form, '保存供应商', () => {
-      const payload = { name: name.value.trim(), baseUrl: baseUrl.value.trim(), apiFormat: apiFormat.value };
+      const payload = { name: name.value.trim(), baseUrl: baseUrl.value.trim(), apiFormat: apiFormat.value, codexUnlock: codexUnlock.checked };
       if (provider) payload.id = provider.id;
       if (apiKey.value.trim()) payload.apiKey = apiKey.value.trim();
       return request('saveProvider', payload);

@@ -50,17 +50,17 @@ async function server(handler, t) {
   return { instance, url: `http://127.0.0.1:${instance.address().port}` };
 }
 
-async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}, onMetrics = () => {}) {
+async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}, onMetrics = () => {}, providerExtra = {}) {
   const requests = [];
   const logs = [];
   const upstream = await server(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    requests.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), auth: req.headers.authorization });
+    requests.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks)), auth: req.headers.authorization, headers: req.headers });
     await upstreamHandler(req, res);
   }, t);
   const proxy = await server((req, res) => {
-    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat }, res, log: event => logs.push(event), timeouts, onMetrics });
+    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat, ...providerExtra }, res, log: event => logs.push(event), timeouts, onMetrics });
   }, t);
   return { ...proxy, requests, logs, upstream };
 }
@@ -431,4 +431,71 @@ test('malformed non-SSE content-type outputs invalid format message', async t =>
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response format is invalid.');
   assert.equal(num(result.messages.at(-1), 5), 13);
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_content_type'));
+});
+
+test('Codex 专线供应商注入 Responses Lite 身份头与必需字段', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, { unlockKind: 'codex' });
+  await fetch(app.url);
+  const upstream = app.requests[0];
+  assert.equal(upstream.headers['x-openai-internal-codex-responses-lite'], 'true');
+  assert.equal(upstream.headers.originator, 'Codex Desktop');
+  assert.match(upstream.headers['user-agent'], /^Codex Desktop\//);
+  assert.equal(upstream.auth, 'Bearer fake-provider-secret');
+  // 身份头与 payload.prompt_cache_key 对齐（Codex 会话亲和）
+  assert.equal(upstream.headers['session-id'], upstream.body.prompt_cache_key);
+  assert.equal(upstream.headers['thread-id'], upstream.body.prompt_cache_key);
+  assert.equal(upstream.headers['x-client-request-id'], upstream.body.prompt_cache_key);
+  assert.equal(upstream.headers['x-codex-window-id'], upstream.body.prompt_cache_key + ':0');
+  assert.ok(upstream.headers['x-codex-turn-metadata'].includes('"session_id":"' + upstream.body.prompt_cache_key + '"'));
+  assert.deepEqual(upstream.body.include, ['reasoning.encrypted_content']);
+  assert.equal(upstream.body.store, false);
+  assert.equal(upstream.body.max_output_tokens, undefined, 'Codex 契约不带 max_output_tokens');
+  assert.match(upstream.body.prompt_cache_key, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test('Codex 专线 prompt_cache_key 按会话首条 user 输入保持稳定', () => {
+  const request = parseChat(nativeRequest());
+  const codex = { apiFormat: 'openai-responses', unlockKind: 'codex' };
+  const a = buildRequestBody(request, { model: 'm' }, codex);
+  const b = buildRequestBody(request, { model: 'm' }, codex);
+  assert.equal(a.prompt_cache_key, b.prompt_cache_key);
+  const other = parseChat(nativeRequest());
+  other.messages[0].content = 'different first user input';
+  const c = buildRequestBody(other, { model: 'm' }, codex);
+  assert.notEqual(a.prompt_cache_key, c.prompt_cache_key);
+});
+
+test('Codex 专线始终走 Responses 契约，不被 apiFormat 误分发', async t => {
+  // 对齐 PR#28 修复：unlock 目标即使配了 chat/completions 格式也必须走
+  // /responses，否则丢掉必需字段与身份头被网关 503。
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai', {}, () => {}, { unlockKind: 'codex' });
+  await fetch(app.url);
+  const upstream = app.requests[0];
+  assert.equal(upstream.url, '/v1/responses');
+  assert.ok(Array.isArray(upstream.body.input), 'payload 使用 Responses input');
+  assert.equal(upstream.body.messages, undefined);
+  assert.equal(upstream.headers['x-openai-internal-codex-responses-lite'], 'true');
+  assert.equal(upstream.headers['session-id'], upstream.body.prompt_cache_key);
+  assert.deepEqual(upstream.body.include, ['reasoning.encrypted_content']);
+  assert.equal(upstream.body.store, false);
+});
+
+test('普通供应商不携带 Codex 身份头与字段', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  });
+  await fetch(app.url);
+  const upstream = app.requests[0];
+  assert.equal(upstream.headers['x-openai-internal-codex-responses-lite'], undefined);
+  assert.equal(upstream.headers['session-id'], undefined);
+  assert.equal(upstream.body.prompt_cache_key, undefined);
+  assert.equal(upstream.body.include, undefined);
+  assert.equal(upstream.body.store, undefined);
 });

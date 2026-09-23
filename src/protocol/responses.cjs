@@ -3,14 +3,18 @@
 const { randomUUID } = require('node:crypto');
 const { frame } = require('./wire.cjs');
 const { textChunk, thinkingChunk, toolChunk, stopChunk } = require('./chat.cjs');
+const { isCodex, applyCodexRequiredFields, codexHeaders } = require('./codex.cjs');
 const { createTracker } = require('../runtime/monitor.cjs');
 const MAX_SSE_BUFFER = 64 * 1024 * 1024;
 
 function isChatFormat(format = '') { return /chat[-_\/]?completions|^(?:chat|openai)$/.test(format); }
+// Codex 解锁目标始终走 Responses 契约（wireApi），不能按 apiFormat 分发到
+// chat/completions——那会丢掉 unlock 必需字段，被网关 503。
+function useChat(provider) { return !isCodex(provider) && isChatFormat(provider.apiFormat); }
 function endpoint(provider) {
   const url = new URL(provider.baseUrl);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid provider URL');
-  const chat = isChatFormat(provider.apiFormat);
+  const chat = useChat(provider);
   url.pathname = url.pathname.replace(/\/(responses|chat\/completions)\/?$/, '').replace(/\/$/, '') + (chat ? '/chat/completions' : '/responses');
   url.search = '';
   url.hash = '';
@@ -30,7 +34,7 @@ function contentOf(message, chat) {
 }
 
 function buildRequestBody(request, route, provider) {
-  const chat = isChatFormat(provider.apiFormat);
+  const chat = useChat(provider);
   const messages = [];
   if (request.systemPrompt !== '') messages.push({ role: chat ? 'system' : 'developer', content: request.systemPrompt });
   for (const message of request.messages) {
@@ -53,7 +57,8 @@ function buildRequestBody(request, route, provider) {
   const body = { model: route.model, [chat ? 'messages' : 'input']: messages, stream: true };
   if (chat) body.stream_options = { include_usage: true };
   const maxTokens = request.maxTokens ?? route.maxOutputTokens ?? route.maxTokens ?? provider.maxOutputTokens ?? provider.maxTokens;
-  if (Number.isSafeInteger(maxTokens) && maxTokens > 0) body[chat ? 'max_completion_tokens' : 'max_output_tokens'] = maxTokens;
+  // Codex CLI 不发送 max_output_tokens，Responses Lite 契约同样不带。
+  if (!isCodex(provider) && Number.isSafeInteger(maxTokens) && maxTokens > 0) body[chat ? 'max_completion_tokens' : 'max_output_tokens'] = maxTokens;
   if (route.effort) {
     if (chat) body.reasoning_effort = route.effort;
     else body.reasoning = { effort: route.effort, ...(route.effort === 'none' ? {} : { summary: 'auto' }) };
@@ -67,6 +72,8 @@ function buildRequestBody(request, route, provider) {
       if (['auto', 'none', 'required', 'any'].includes(type)) body.tool_choice = type === 'any' ? 'required' : type;
     }
   }
+  // Codex 专线渠道校验 Responses Lite 契约字段，缺省会被网关 503。
+  if (isCodex(provider)) applyCodexRequiredFields(body);
   return body;
 }
 
@@ -300,7 +307,11 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       headers: {
         'content-type': 'application/json',
         accept: 'text/event-stream',
-        ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {})
+        // Codex 网关依据 responses-lite 身份头识别契约；session-id 与
+        // prompt_cache_key 对齐做会话亲和。chat/completions 同样需要该头。
+        ...(isCodex(provider)
+          ? codexHeaders(provider, body.prompt_cache_key)
+          : (provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}))
       },
       body: JSON.stringify(body),
       signal: upstreamController.signal
