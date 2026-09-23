@@ -7,7 +7,7 @@ const { once } = require('node:events');
 const zlib = require('node:zlib');
 const wire = require('../src/protocol/wire.cjs');
 const { parseChat } = require('../src/protocol/chat.cjs');
-const { serveChat, buildRequestBody } = require('../src/protocol/responses.cjs');
+const { serveChat, buildRequestBody, retryBackoffMs } = require('../src/protocol/responses.cjs');
 const { s, v, m, str, num, fields } = wire;
 
 function nativeMessage(source, text, extra = []) {
@@ -50,7 +50,7 @@ async function server(handler, t) {
   return { instance, url: `http://127.0.0.1:${instance.address().port}` };
 }
 
-async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}, onMetrics = () => {}, providerExtra = {}) {
+async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}, onMetrics = () => {}, providerExtra = {}, serveExtra = {}) {
   const requests = [];
   const logs = [];
   const upstream = await server(async (req, res) => {
@@ -60,7 +60,7 @@ async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeou
     await upstreamHandler(req, res);
   }, t);
   const proxy = await server((req, res) => {
-    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat, ...providerExtra }, res, log: event => logs.push(event), timeouts, onMetrics });
+    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat, ...providerExtra }, res, log: event => logs.push(event), timeouts, onMetrics, ...serveExtra });
   }, t);
   return { ...proxy, requests, logs, upstream };
 }
@@ -431,6 +431,79 @@ test('malformed non-SSE content-type outputs invalid format message', async t =>
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response format is invalid.');
   assert.equal(num(result.messages.at(-1), 5), 13);
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_content_type'));
+});
+
+test('retry backoff follows 1,1,2,2,3,3,5,5,8,8,13,13,21,21 then caps at 30s', () => {
+  const expected = [1, 1, 2, 2, 3, 3, 5, 5, 8, 8, 13, 13, 21, 21, 30, 30, 30, 30].map(s => s * 1000);
+  assert.deepEqual(expected.map((_, i) => retryBackoffMs(i + 1)), expected);
+});
+
+test('transient HTTP error retried transparently then succeeds', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    if (calls < 3) { res.writeHead(503); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.output_text.delta', delta: 'Recovered' }) +
+      event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Recovered');
+  assert.equal(num(result.messages.at(-1), 5), 2);
+  assert.equal(calls, 3);
+  assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.code === 'upstream_http').length, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-complete' && l.attempts === 2));
+});
+
+test('connection reset before response is retried', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    if (calls === 1) { req.socket.destroy(); return; }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 3, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(num(result.messages.at(-1), 5), 2);
+  assert.equal(calls, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-retry' && l.code === 'upstream_network'));
+});
+
+test('retry exhaustion still surfaces the provider error', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => { calls++; res.writeHead(503); res.end(); },
+    'openai-responses', {}, () => {}, {}, { retries: 2, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 503.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.equal(calls, 3);
+  assert.equal(app.logs.filter(l => l.event === 'chat-retry').length, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.attempts === 2));
+});
+
+test('terminal HTTP error is not retried', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => { calls++; res.writeHead(400); res.end(); },
+    'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 400.');
+  assert.equal(calls, 1);
+  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
+});
+
+test('mid-stream failure after emitted output is not retried', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
+    res.write(event({ type: 'response.failed', error: { message: 'boom' } }));
+    res.end();
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'PartialProvider response could not be completed.');
+  assert.equal(calls, 1);
+  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
 });
 
 test('Codex 专线供应商注入 Responses Lite 身份头与必需字段', async t => {

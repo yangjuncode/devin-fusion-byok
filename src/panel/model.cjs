@@ -84,6 +84,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     fusionChoices: Object.values(catalog.fusions).map(fusion => ({ uid: fusion.uid, label: fusion.label })),
     autoContinueOnProviderError: config.autoContinueOnProviderError === true,
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
+    upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
   };
 }
@@ -272,6 +273,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
+      case 'setUpstreamRetries': {
+        const count = payload.count;
+        if (!Number.isSafeInteger(count) || count < 0 || count > 100) fail('重试次数必须是 0 到 100 之间的整数。');
+        config.upstreamRetries = count;
+        break;
+      }
       default: fail('不支持的操作。');
     }
     cleanSidekicks(config);

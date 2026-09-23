@@ -14,6 +14,12 @@ const VERSION = require('../../package.json').version;
 const API_PREFIX = '/exa.api_server_pb.ApiServerService/';
 const SERVICE = 'devin-fusion-byok';
 const MANAGEMENT_PROTOCOL = 1;
+const DEFAULT_UPSTREAM_RETRIES = 20;
+// 上游错误透明重试次数：缺省或非法值按默认 20 处理，0 表示关闭。
+function upstreamRetries(current) {
+  return Number.isSafeInteger(current?.upstreamRetries) && current.upstreamRetries >= 0
+    ? Math.min(current.upstreamRetries, 100) : DEFAULT_UPSTREAM_RETRIES;
+}
 const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
 function sourceId() {
   const hash = crypto.createHash('sha256');
@@ -118,7 +124,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
           const abort = new AbortController();
           response.on('close', () => { if (!response.writableFinished) abort.abort(); });
           log('inference', { model: route.model, effort: route.effort, tools: chat.tools.map(t => t.name) });
-          await serveChat({ request: chat, route, provider, res: response, signal: abort.signal,
+          await serveChat({ request: chat, route, provider, res: response, signal: abort.signal, retries: upstreamRetries(current),
             log: ({ event, ...data }) => log(event, data), onMetrics: recordMetrics });
           return;
         }

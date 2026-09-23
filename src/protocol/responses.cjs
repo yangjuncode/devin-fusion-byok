@@ -258,11 +258,26 @@ function processor(id, uid, chat, emit) {
   };
 }
 
-async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {}, onMetrics = () => {} }) {
+// 上游临时错误的可重试判定：与 auto-continue 的 TRANSIENT_HTTP_RE 口径一致，
+// 4xx 中只有 408/429 值得重试，其余视为确定性失败。
+const RETRYABLE_HTTP_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_CODES = new Set([
+  'upstream_network', 'upstream_timeout', 'upstream_content_type',
+  'upstream_stream_error', 'upstream_stream_incomplete',
+  'upstream_invalid_json', 'upstream_invalid_tool'
+]);
+// 重试间隔（秒）：1,1,2,2,3,3,5,5,8,8,13,13,21,21，之后固定 30。
+const RETRY_BACKOFF_SECONDS = [1, 1, 2, 2, 3, 3, 5, 5, 8, 8, 13, 13, 21, 21];
+function retryBackoffMs(attempt) {
+  const seconds = attempt <= RETRY_BACKOFF_SECONDS.length ? RETRY_BACKOFF_SECONDS[attempt - 1] : 30;
+  return seconds * 1000;
+}
+
+async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {}, retries = 0, retryDelayMs = null, onMetrics = () => {} }) {
   const id = randomUUID();
-  const metrics = createTracker({ id, request, route, provider });
+  let metrics = createTracker({ id, request, route, provider });
   let outcome = 'error', outcomeCode = null;
-  const upstreamController = new AbortController();
+  let upstreamController = new AbortController();
   const abort = () => upstreamController.abort();
   const close = () => { if (!res.writableEnded) upstreamController.abort(); };
   signal?.addEventListener('abort', abort, { once: true });
@@ -286,6 +301,9 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     ? Math.min(timeouts.firstResponseMs, 2147483647) : 120000;
   const idleLimit = Number.isSafeInteger(timeouts?.idleMs) && timeouts.idleMs > 0
     ? Math.min(timeouts.idleMs, 2147483647) : 120000;
+  const maxRetries = Number.isSafeInteger(retries) && retries > 0 ? Math.min(retries, 100) : 0;
+  // retryDelayMs 为内部覆盖项（测试用），缺省时按 RETRY_BACKOFF 递增间隔。
+  const fixedRetryWait = Number.isSafeInteger(retryDelayMs) && retryDelayMs >= 0 ? Math.min(retryDelayMs, 60000) : null;
 
   let activeTimer = null;
   const clearTimer = () => { if (activeTimer) { clearTimeout(activeTimer); activeTimer = null; } };
@@ -296,105 +314,24 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       upstreamController.abort();
     }, ms);
   };
+  const pause = ms => new Promise(resolve => {
+    const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); res.off('close', finish); resolve(); };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+    res.once('close', finish);
+  });
+  // 已向客户端输出内容后无法透明重发（会产生重复输出），只能走原错误路径。
+  const canRetry = () => !res.headersSent &&
+    (classifiedCode === 'upstream_http' ? RETRYABLE_HTTP_STATUS.has(status) : RETRYABLE_CODES.has(classifiedCode));
 
-  try {
-    const { url, chat } = endpoint(provider);
-    const body = buildRequestBody(request, route, provider);
-
-    armTimer(firstResponseLimit, 'upstream_timeout');
-    const upstream = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'text/event-stream',
-        // Codex 网关依据 responses-lite 身份头识别契约；session-id 与
-        // prompt_cache_key 对齐做会话亲和。chat/completions 同样需要该头。
-        ...(isCodex(provider)
-          ? codexHeaders(provider, body.prompt_cache_key)
-          : (provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}))
-      },
-      body: JSON.stringify(body),
-      signal: upstreamController.signal
-    });
-    clearTimer();
-
-    status = upstream.status;
-    if (!upstream.ok) {
-      classifiedCode = 'upstream_http';
-      await upstream.body?.cancel();
-      throw new Error('Upstream HTTP error');
-    }
-    const contentType = upstream.headers.get('content-type') || '';
-    if (!upstream.body || !contentType.toLowerCase().includes('text/event-stream')) {
-      classifiedCode = 'upstream_content_type';
-      await upstream.body?.cancel();
-      throw new Error('Upstream did not return SSE');
-    }
-
-    async function* rawChunksWithTimeout(bodyStream) {
-      const reader = bodyStream.getReader();
-      try {
-        while (true) {
-          armTimer(idleLimit, 'upstream_timeout');
-          let res;
-          try {
-            res = await reader.read();
-          } catch (err) {
-            if (classifiedCode !== 'upstream_timeout') classifiedCode = 'upstream_stream_error';
-            throw err;
-          } finally {
-            clearTimer();
-          }
-          if (res.done) break;
-          yield res.value;
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    }
-
-    const stream = processor(id, route.uid || request.modelUid, chat, write);
-    try {
-      for await (const event of events(rawChunksWithTimeout(upstream.body))) {
-        metrics.event(event, chat);
-        await stream.event(event);
-        if (event.type === 'done' || (!chat && stream.terminal)) break;
-      }
-    } catch (err) {
-      if (classifiedCode !== 'upstream_timeout') {
-        const allowedCodes = new Set([
-          'upstream_timeout', 'upstream_http', 'upstream_content_type',
-          'upstream_stream_error', 'upstream_stream_incomplete',
-          'upstream_invalid_tool', 'upstream_invalid_json', 'upstream_network'
-        ]);
-        classifiedCode = allowedCodes.has(err?.code) ? err.code : 'upstream_stream_error';
-      }
-      throw err;
-    }
-
-    let toolNames;
-    try {
-      toolNames = await stream.finish();
-    } catch (err) {
-      classifiedCode = err?.code === 'upstream_invalid_tool' ? 'upstream_invalid_tool' : 'upstream_stream_incomplete';
-      throw err;
-    }
-
-    res.end(frame(Buffer.from('{}'), 2));
-    outcome = 'success';
-    record({ event: 'chat-complete', model: route.model, status, toolNames, requestId: id });
-    return { status, toolNames, requestId: id };
-  } catch (err) {
-    clearTimer();
-    const isClientCancel = signal?.aborted || res.destroyed || res.writableEnded;
-    if (isClientCancel) {
-      outcome = 'cancelled';
-      outcomeCode = 'client_cancelled';
-      record({ event: 'chat-aborted', model: route.model, status });
-      if (!res.destroyed && !res.writableEnded) res.destroy();
-      return { status, aborted: true };
-    }
-
+  const emitCancelled = () => {
+    outcome = 'cancelled';
+    outcomeCode = 'client_cancelled';
+    record({ event: 'chat-aborted', model: route.model, status });
+    if (!res.destroyed && !res.writableEnded) res.destroy();
+    return { status, aborted: true };
+  };
+  const emitFailure = async attempts => {
     let errorText = 'Provider response could not be completed.';
     if (classifiedCode === 'upstream_http' && status >= 400) {
       errorText = `Provider returned HTTP ${status}.`;
@@ -410,8 +347,123 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       if (!res.destroyed && !res.writableEnded) res.destroy();
     }
     outcomeCode = classifiedCode;
-    record({ event: 'chat-error', model: route.model, status, code: classifiedCode, requestId: id });
+    record({ event: 'chat-error', model: route.model, status, code: classifiedCode, requestId: id, ...(attempts > 0 ? { attempts } : {}) });
     return { status, error: true, code: classifiedCode, requestId: id };
+  };
+
+  try {
+    const { url, chat } = endpoint(provider);
+    const body = buildRequestBody(request, route, provider);
+
+    let attempts = 0;
+    for (;;) {
+      upstreamController = new AbortController();
+      if (signal?.aborted) upstreamController.abort();
+      status = 0;
+      classifiedCode = 'upstream_network';
+      metrics = createTracker({ id, request, route, provider });
+      try {
+        armTimer(firstResponseLimit, 'upstream_timeout');
+        const upstream = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            // Codex 网关依据 responses-lite 身份头识别契约；session-id 与
+            // prompt_cache_key 对齐做会话亲和。chat/completions 同样需要该头。
+            ...(isCodex(provider)
+              ? codexHeaders(provider, body.prompt_cache_key)
+              : (provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}))
+          },
+          body: JSON.stringify(body),
+          signal: upstreamController.signal
+        });
+        clearTimer();
+
+        status = upstream.status;
+        if (!upstream.ok) {
+          classifiedCode = 'upstream_http';
+          await upstream.body?.cancel();
+          throw new Error('Upstream HTTP error');
+        }
+        const contentType = upstream.headers.get('content-type') || '';
+        if (!upstream.body || !contentType.toLowerCase().includes('text/event-stream')) {
+          classifiedCode = 'upstream_content_type';
+          await upstream.body?.cancel();
+          throw new Error('Upstream did not return SSE');
+        }
+
+        async function* rawChunksWithTimeout(bodyStream) {
+          const reader = bodyStream.getReader();
+          try {
+            while (true) {
+              armTimer(idleLimit, 'upstream_timeout');
+              let res;
+              try {
+                res = await reader.read();
+              } catch (err) {
+                if (classifiedCode !== 'upstream_timeout') classifiedCode = 'upstream_stream_error';
+                throw err;
+              } finally {
+                clearTimer();
+              }
+              if (res.done) break;
+              yield res.value;
+            }
+          } finally {
+            reader.releaseLock();
+          }
+        }
+
+        const stream = processor(id, route.uid || request.modelUid, chat, write);
+        try {
+          for await (const event of events(rawChunksWithTimeout(upstream.body))) {
+            metrics.event(event, chat);
+            await stream.event(event);
+            if (event.type === 'done' || (!chat && stream.terminal)) break;
+          }
+        } catch (err) {
+          if (classifiedCode !== 'upstream_timeout') {
+            const allowedCodes = new Set([
+              'upstream_timeout', 'upstream_http', 'upstream_content_type',
+              'upstream_stream_error', 'upstream_stream_incomplete',
+              'upstream_invalid_tool', 'upstream_invalid_json', 'upstream_network'
+            ]);
+            classifiedCode = allowedCodes.has(err?.code) ? err.code : 'upstream_stream_error';
+          }
+          throw err;
+        }
+
+        let toolNames;
+        try {
+          toolNames = await stream.finish();
+        } catch (err) {
+          classifiedCode = err?.code === 'upstream_invalid_tool' ? 'upstream_invalid_tool' : 'upstream_stream_incomplete';
+          throw err;
+        }
+
+        res.end(frame(Buffer.from('{}'), 2));
+        outcome = 'success';
+        record({ event: 'chat-complete', model: route.model, status, toolNames, requestId: id, ...(attempts > 0 ? { attempts } : {}) });
+        return { status, toolNames, requestId: id };
+      } catch (err) {
+        clearTimer();
+        if (signal?.aborted || res.destroyed || res.writableEnded) return emitCancelled();
+        if (attempts < maxRetries && canRetry()) {
+          attempts++;
+          upstreamController.abort();
+          const delay = fixedRetryWait ?? retryBackoffMs(attempts);
+          record({ event: 'chat-retry', model: route.model, status, code: classifiedCode, attempts, delay, requestId: id });
+          await pause(delay);
+          continue;
+        }
+        return await emitFailure(attempts);
+      }
+    }
+  } catch (err) {
+    clearTimer();
+    if (signal?.aborted || res.destroyed || res.writableEnded) return emitCancelled();
+    return await emitFailure(0);
   } finally {
     try { onMetrics(metrics.finish(outcome, status, outcomeCode)); } catch {}
     clearTimer();
@@ -421,4 +473,4 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
   }
 }
 
-module.exports = { serveChat, buildRequestBody, parseEvent };
+module.exports = { serveChat, buildRequestBody, parseEvent, retryBackoffMs };

@@ -70,6 +70,7 @@ function renderPanel({ nonce, cspSource }) {
     .model-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; min-height: 52px; }
     .model-row + .model-row { border-top: 1px solid var(--vscode-panel-border, #454545); }
     .model-label { display: flex; gap: 10px; align-items: center; flex: 1; min-width: 0; cursor: pointer; }
+    input.retry-count { width: 90px; flex: 0 0 auto; }
     .model-text { display: block; min-width: 0; flex: 1; }
     .model-title, .model-id { display: block; overflow-wrap: anywhere; }
     .model-id { color: var(--vscode-descriptionForeground, #999); font: 11px/1.5 var(--vscode-editor-font-family, monospace); }
@@ -450,6 +451,26 @@ function panelClient(modelSupportsImages, vscode) {
           element('span', { class: 'model-title', text: '遇到服务商错误时自动继续回复' }),
           element('span', { class: 'hint', text: '当模型回复以“Provider response could not be completed”结尾或返回临时网络错误时自动发送 continue，重复直到正常响应。' }),
           element('span', { class: 'subtle-warning', text: '注意：若服务商按 Token 计费，频繁重试可能产生额外费用。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'number',
+          class: 'retry-count',
+          min: '0',
+          max: '100',
+          step: '1',
+          value: String(state.upstreamRetries ?? 20),
+          disabled: state.enabled === false,
+          'aria-label': '上游错误自动重试次数',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const count = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setUpstreamRetries', { count }), '正在保存重试次数…')
+              .then(ok => { if (!ok) event.target.value = String(state.upstreamRetries ?? 20); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '上游错误自动重试' }),
+          element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出任何内容时生效，默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'checkbox',
