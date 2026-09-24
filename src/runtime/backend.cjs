@@ -89,21 +89,81 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
   const configFile = path.join(root, 'config.json');
   const config = () => readConfig(configFile);
   const observedNatives = new Map();
+  // 与 /_runtime/native-models 输出契约一致的严格校验；不合格条目直接丢弃，
+  // 防止损坏的本地快照或异常上报污染资格判定。
+  const sanitizeNativeEntry = entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    if (typeof entry.uid !== 'string' || !entry.uid || entry.uid.length > 256 ||
+        /^(?:fusion-)?dfbyok-/.test(entry.uid)) return null;
+    if (typeof entry.disabled !== 'boolean' || typeof entry.isModelRouter !== 'boolean' ||
+        !Array.isArray(entry.harnessUids) || entry.harnessUids.some(uid => typeof uid !== 'string')) return null;
+    const next = { uid: entry.uid, label: typeof entry.label === 'string' ? entry.label : '',
+      disabled: entry.disabled, isModelRouter: entry.isModelRouter, harnessUids: entry.harnessUids };
+    const dimension = entry.sidekickDimension;
+    if (dimension !== undefined) {
+      if (!dimension || typeof dimension !== 'object' || Array.isArray(dimension) ||
+          !Number.isSafeInteger(dimension.order) || dimension.order < 0 || dimension.order > 0x7fffffff ||
+          typeof dimension.name !== 'string' || !dimension.name ||
+          (dimension.fastModeOrder !== undefined &&
+            (!Number.isSafeInteger(dimension.fastModeOrder) || dimension.fastModeOrder < 0))) return null;
+      next.sidekickDimension = { order: dimension.order, name: dimension.name, fastModeOrder: dimension.fastModeOrder };
+    }
+    if (entry.fusionMetadata !== undefined) {
+      if (!Array.isArray(entry.fusionMetadata)) return null;
+      const validMeta = [], seenKeys = new Set();
+      for (const item of entry.fusionMetadata) {
+        if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' ||
+            !Number.isSafeInteger(item.order) || item.order < 0 || item.order > 0x7fffffff ||
+            typeof item.name !== 'string' ||
+            (item.controlType !== undefined &&
+              (!Number.isSafeInteger(item.controlType) || item.controlType < 0 || item.controlType > 0x7fffffff)) ||
+            seenKeys.has(item.key)) return null;
+        seenKeys.add(item.key);
+        validMeta.push({ key: item.key, order: item.order, name: item.name, controlType: item.controlType ?? 0 });
+      }
+      next.fusionMetadata = validMeta;
+    }
+    if (entry.maxTokens !== undefined) {
+      if (!Number.isSafeInteger(entry.maxTokens) || entry.maxTokens <= 0) return null;
+      next.maxTokens = entry.maxTokens;
+    }
+    if (entry.maxOutputTokens !== undefined) {
+      if (!Number.isSafeInteger(entry.maxOutputTokens) || entry.maxOutputTokens <= 0) return null;
+      next.maxOutputTokens = entry.maxOutputTokens;
+    }
+    if (entry.supportsImages === true) next.supportsImages = true;
+    return next;
+  };
+  // 官方目录观察快照跨进程保留：GetCliTeamSettings、AssignModel 可能先于本进程
+  // 首次目录响应到达，快照让已观察过的官方角色预设立即恢复可解析状态。
+  // 资格仍只来自真实观察记录，快照只是记忆，不凭空授予任何能力。
+  const nativeSnapshotFile = path.join(root, 'native-models.json');
+  let nativeSnapshot = '[]';
+  const persistNatives = () => {
+    const models = [...observedNatives.values()];
+    const snapshot = JSON.stringify(models);
+    if (snapshot === nativeSnapshot) return;
+    nativeSnapshot = snapshot;
+    try { fs.writeFileSync(nativeSnapshotFile, JSON.stringify({ version: 1, models }), { mode: 0o600 }); } catch {}
+  };
+  try {
+    if (fs.statSync(nativeSnapshotFile).size <= 8 * 1024 * 1024) {
+      const saved = JSON.parse(fs.readFileSync(nativeSnapshotFile, 'utf8'));
+      const list = Array.isArray(saved) ? saved : saved?.models;
+      for (const item of Array.isArray(list) ? list.slice(0, 4096) : []) {
+        const clean = sanitizeNativeEntry(item);
+        if (clean) observedNatives.set(clean.uid, clean);
+      }
+      nativeSnapshot = JSON.stringify([...observedNatives.values()]);
+    }
+  } catch {}
   const onNativeModels = entries => {
     if (!Array.isArray(entries)) return;
     for (const entry of entries) {
-      if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
-      const dimension = entry.sidekickDimension;
-      observedNatives.set(entry.uid, { uid: entry.uid, label: typeof entry.label === 'string' ? entry.label : '',
-        disabled: entry.disabled === true, isModelRouter: entry.isModelRouter === true,
-        harnessUids: Array.isArray(entry.harnessUids) ? entry.harnessUids.filter(value => typeof value === 'string') : [],
-        ...(dimension && typeof dimension === 'object'
-          ? { sidekickDimension: { order: dimension.order, name: dimension.name, fastModeOrder: dimension.fastModeOrder } } : {}),
-        ...(Array.isArray(entry.fusionMetadata) ? { fusionMetadata: entry.fusionMetadata } : {}),
-        ...(entry.maxTokens ? { maxTokens: entry.maxTokens } : {}),
-        ...(entry.maxOutputTokens ? { maxOutputTokens: entry.maxOutputTokens } : {}),
-        ...(entry.supportsImages ? { supportsImages: true } : {}) });
+      const clean = sanitizeNativeEntry(entry);
+      if (clean) observedNatives.set(clean.uid, clean);
     }
+    persistNatives();
   };
   const getCatalog = () => { const current = config(); return buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...observedNatives.values()]); };
   // Official Fusion uids observed as disabled in catalog responses. Entries
@@ -207,6 +267,29 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
       }
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ instanceId, models: [...observedNatives.values()] })); return;
+    }
+    if (request.method === 'POST' && request.url === '/_runtime/native-models') {
+      const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';
+      const expected = 'Bearer ' + controlToken;
+      if (Buffer.byteLength(provided) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+        response.writeHead(403); response.end(); return;
+      }
+      // 窗口内经 LS 桥观察到的官方目录也并入快照：CLI 磁盘缓存新鲜时后端可能
+      // 长期收不到目录流量，扩展侧观察可提前预热原生角色判定。
+      Promise.resolve().then(() => collect(request, 8 * 1024 * 1024)).then(body => {
+        const data = JSON.parse(body.toString('utf8'));
+        const list = Array.isArray(data) ? data : data?.models;
+        if (!Array.isArray(list)) throw new Error('invalid');
+        for (const item of list.slice(0, 4096)) {
+          const clean = sanitizeNativeEntry(item);
+          if (clean) observedNatives.set(clean.uid, clean);
+        }
+        persistNatives();
+        if (response.destroyed) return;
+        response.writeHead(202, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ recorded: true, instanceId }));
+      }).catch(() => { if (!response.destroyed) { response.writeHead(400); response.end(); } });
+      return;
     }
     if (request.method === 'POST' && request.url === '/_runtime/monitor/record') {
       const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';

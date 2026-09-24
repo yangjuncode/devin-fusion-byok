@@ -7,7 +7,7 @@ const os = require('node:os');
 const { createRequire } = require('node:module');
 const vm = require('node:vm');
 const { startBackend, controlFile, runtimeIdentity } = require('../src/runtime/backend.cjs');
-const { readNativeModels } = require('../src/runtime/native-models.cjs');
+const { readNativeModels, reportNativeModels } = require('../src/runtime/native-models.cjs');
 const { collect } = require('../src/runtime/bridge.cjs');
 const { createManager } = require('../src/panel/model.cjs');
 const { buildCatalog, buildRoleLists } = require('../src/catalog.cjs');
@@ -168,6 +168,22 @@ test('createManager.ready hydrates panel state from a synced backend with zero L
   assert.ok(roleLists.lead.some(r => r.ref.nativeUid === 'claude-fable-5-1-medium'), 'Claude Lead is present from backend observations');
   const nativeCreated = await manager.dispatch('saveFusionPreset', { name: 'Native Lead', lead: { nativeUid: 'claude-fable-5-1-medium' }, sidekick: lead.ref });
   assert.equal(nativeCreated.fusionCount, 2);
+});
+
+test('reportNativeModels pushes LS-observed entries into the backend snapshot', async t => {
+  const f = await backendFixture(t, { natives: [] });
+  const before = await readNativeModels({ root: f.root, port: f.backend.port });
+  assert.equal(before.status, 'empty', 'no catalog traffic observed yet');
+  const entries = [{ uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] }];
+  assert.equal(await reportNativeModels({ root: f.root, entries, port: f.backend.port }), true);
+  const after = await readNativeModels({ root: f.root, port: f.backend.port });
+  assert.equal(after.status, 'ready');
+  assert.equal(after.models[0].uid, 'swe-2-max');
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.root, 'native-models.json'), 'utf8'));
+  assert.equal(snapshot.models[0].uid, 'swe-2-max', 'reported entries land in the persisted snapshot');
+  assert.equal(await reportNativeModels({ root: f.root, entries: [], port: f.backend.port }), false, 'empty batches are not sent');
+  await assert.rejects(reportNativeModels({ root: f.root + '-other', entries, port: f.backend.port }), /native_catalog_identity/,
+    'a foreign root can never write into this backend');
 });
 
 test('backend observations remain scoped to the live instance', async t => {

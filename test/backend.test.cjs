@@ -60,7 +60,8 @@ async function fixture(t) {
   const control = () => JSON.parse(fs.readFileSync(actualBackend.controlFile(root), 'utf8'));
   const shutdown = (token = control().token) => fetch(base + '/_runtime/shutdown', { method: 'POST', headers: { authorization: 'Bearer ' + token } });
   return { root, config, backend, base, health, control, shutdown, forwarded, chats, logs, held,
-    setHold: value => { hold = value; }, setNatives: value => { natives = value; } };
+    setHold: value => { hold = value; }, setNatives: value => { natives = value; },
+    start: () => module.exports.startBackend({ root, port: 0, log: (...event) => logs.push(event) }) };
 }
 
 test('runtime health exposes ownership and source identity without exposing its private control token', async t => {
@@ -360,4 +361,98 @@ test('officially paired and standalone native Sidekicks assign declared harnesse
   assert.deepEqual(oddData.assignment.harnessUids, ['odd-harness']);
   const disabled = observed.map(item => item.uid === 'swe-odd' ? { ...item, disabled: true } : item);
   assert.equal(Object.values(buildCatalog(f.config, disabled).fusions).some(fusion => fusion.sidekickUid === 'swe-odd'), false);
+});
+
+test('a persisted native snapshot resolves presets and AssignModel immediately after restart', async t => {
+  const f = await fixture(t);
+  const observed = [
+    { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+  ];
+  const fusion = Object.values(buildCatalog(f.config, observed).fusions).find(fusion => fusion.sidekickUid === 'swe-2-max');
+  const body = JSON.stringify({ modelRouterUid: fusion.uid, fusionLeadRouterUid: fusion.uid });
+  const cold = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(await cold.text(), 'official', 'no observation yet: fails closed');
+  f.setNatives(observed);
+  await fetch(f.base + API + 'GetCliModelConfigs', { method: 'POST', body: 'native' });
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.root, 'native-models.json'), 'utf8'));
+  assert.deepEqual(snapshot.models.find(entry => entry.uid === 'swe-2-max').harnessUids, ['swe-1p6', 'swe-1p5']);
+  assert.equal(fs.statSync(path.join(f.root, 'native-models.json')).mode & 0o777, 0o600);
+  await f.backend.close();
+  const restarted = await f.start();
+  t.after(() => restarted.close());
+  const base = 'http://127.0.0.1:' + restarted.port;
+  const resolved = await fetch(base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  const data = JSON.parse(await resolved.text());
+  assert.equal(data.assignment.modelUid, 'swe-2-max', 'restart resolves the saved preset without a fresh observation');
+  assert.deepEqual(data.assignment.harnessUids, ['swe-1p6', 'swe-1p5']);
+  const listed = await fetch(base + '/_runtime/native-models', { headers: { authorization: 'Bearer ' + f.control().token } });
+  assert.equal(listed.status, 200);
+  assert.ok((await listed.json()).models.some(entry => entry.uid === 'swe-2-max'));
+});
+
+test('a persisted snapshot also restores presets whose Lead is an official model', async t => {
+  const f = await fixture(t);
+  const cfg = JSON.parse(fs.readFileSync(path.join(f.root, 'config.json'), 'utf8'));
+  cfg.fusionPresets.push({ id: 'nativelead', name: 'nativelead',
+    lead: { nativeUid: 'swe-2-max' }, sidekick: { providerId: 'test', model: 'model' } });
+  fs.writeFileSync(path.join(f.root, 'config.json'), JSON.stringify(cfg));
+  const observed = [{ uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] }];
+  const fusion = Object.values(buildCatalog(cfg, observed).fusions).find(fusion => fusion.leadUid === 'swe-2-max');
+  assert.ok(fusion?.leadNative, 'fixture preset resolves swe-2-max as a native Lead');
+  const body = JSON.stringify({ modelRouterUid: fusion.uid });
+  f.setNatives(observed);
+  await fetch(f.base + API + 'GetCliModelConfigs', { method: 'POST', body: 'native' });
+  await f.backend.close();
+  const restarted = await f.start();
+  t.after(() => restarted.close());
+  const base = 'http://127.0.0.1:' + restarted.port;
+  const resolved = await fetch(base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  const data = JSON.parse(await resolved.text());
+  assert.equal(data.assignment.modelUid, 'swe-2-max', 'restart resolves the native Lead without a fresh observation');
+  assert.deepEqual(data.assignment.harnessUids, ['fusion', 'swe-1p6']);
+});
+
+test('a corrupt or oversized native snapshot is ignored and still fails closed', async t => {
+  const f = await fixture(t);
+  const fusion = Object.values(buildCatalog(f.config, [
+    { uid: 'swe-2-max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] },
+  ]).fusions).find(fusion => fusion.sidekickUid === 'swe-2-max');
+  const body = JSON.stringify({ modelRouterUid: fusion.uid, fusionLeadRouterUid: fusion.uid });
+  for (const content of ['{corrupt', '{"version":1,"models":[{"uid":"swe-2-max"}]}', '[{"uid":"dfbyok-forged","disabled":false,"isModelRouter":false,"harnessUids":["x"]}]']) {
+    fs.writeFileSync(path.join(f.root, 'native-models.json'), content);
+    const backend = await f.start();
+    const base = 'http://127.0.0.1:' + backend.port;
+    const resolved = await fetch(base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    assert.equal(await resolved.text(), 'official', content.slice(0, 30));
+    const forged = await fetch(base + API + 'GetChatMessage', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelUid: 'dfbyok-forged', messages: [] }) });
+    assert.equal(await forged.text(), 'official', 'forged own uid is never honored');
+    await backend.close();
+  }
+});
+
+test('POST /_runtime/native-models merges authenticated extension observations into the snapshot', async t => {
+  const f = await fixture(t);
+  const endpoint = f.base + '/_runtime/native-models';
+  const entry = { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] };
+  for (const headers of [{}, { authorization: 'Bearer deadbeef' }]) {
+    const denied = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ models: [entry] }) });
+    assert.equal(denied.status, 403);
+  }
+  const bad = await fetch(endpoint, { method: 'POST', headers: { authorization: 'Bearer ' + f.control().token,
+    'content-type': 'application/json' }, body: '{"models":"nope"}' });
+  assert.equal(bad.status, 400);
+  const fusion = Object.values(buildCatalog(f.config, [entry]).fusions).find(fusion => fusion.sidekickUid === 'swe-2-max');
+  const body = JSON.stringify({ modelRouterUid: fusion.uid, fusionLeadRouterUid: fusion.uid });
+  const cold = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  assert.equal(await cold.text(), 'official');
+  const reported = await fetch(endpoint, { method: 'POST', headers: { authorization: 'Bearer ' + f.control().token,
+    'content-type': 'application/json' }, body: JSON.stringify({ models: [entry] }) });
+  assert.equal(reported.status, 202);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(f.root, 'native-models.json'), 'utf8')).models.some(item => item.uid === 'swe-2-max'));
+  const resolved = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+  const data = JSON.parse(await resolved.text());
+  assert.equal(data.assignment.modelUid, 'swe-2-max');
+  assert.deepEqual(data.assignment.harnessUids, ['swe-1p6']);
 });

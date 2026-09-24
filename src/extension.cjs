@@ -10,7 +10,7 @@ const { installLsInjection } = require('./runtime/ls-injection.cjs');
 const { createLsBridge } = require('./runtime/bridge.cjs');
 const { runtimeIdentity, controlFile, PORT, MANAGEMENT_PROTOCOL } = require('./runtime/backend.cjs');
 const { readReceipt, remember, saveReceipt, valueAt, restoreObject, permitted } = require('./lifecycle/owned-settings.cjs');
-const { readNativeModels } = require('./runtime/native-models.cjs');
+const { readNativeModels, reportNativeModels } = require('./runtime/native-models.cjs');
 const { installAutoContinue } = require('./runtime/auto-continue.cjs');
 let stopNativeSync;
 let stopAutoContinue;
@@ -177,6 +177,10 @@ async function activate(context) {
       nativeModels.clear();
       for (const entry of localNativeModels.values()) nativeModels.set(entry.uid, entry);
       for (const entry of result.models) nativeModels.set(entry.uid, entry);
+      // 后端进程重启会重建观察集；本地已观察而快照为空时主动回推补齐。
+      if (result.status === 'empty' && localNativeModels.size) {
+        try { void reportNativeModels({ root, entries: [...localNativeModels.values()] }).catch(() => {}); } catch {}
+      }
       try { await management?.publish(); } catch {}
     })().finally(() => { if (syncAbort === abort) { syncAbort = undefined; syncPending = undefined; } });
     return syncPending;
@@ -212,7 +216,12 @@ async function activate(context) {
         localNativeModels.set(next.uid, next); nativeModels.set(next.uid, next); changed = true;
       }
     }
-    if (changed && !activationDisposed) try { void management?.publish()?.catch(() => {}); } catch {}
+    if (changed && !activationDisposed) {
+      // 回写后端并入持久快照：CLI 可能先拉 GetCliTeamSettings 再拉目录，
+      // 甚至因磁盘缓存命中长期不拉目录；推送让原生角色预设尽快可解析。
+      try { void reportNativeModels({ root, entries: [...localNativeModels.values()] }).catch(() => {}); } catch {}
+      try { void management?.publish()?.catch(() => {}); } catch {}
+    }
   };
   let enableQueue = Promise.resolve();
   const ensureEnabled = () => {

@@ -57,4 +57,36 @@ async function readNativeModels({ root, port = PORT, signal, request = fetch }) 
   });
   return { status: models.length ? 'ready' : 'empty', models };
 }
-module.exports = { readNativeModels };
+// 把本窗口经 LS 桥观察到的官方目录条目回写给后端，并入其持久快照；
+// 后端未在监听或身份不匹配时安静失败，等待下次变化重发。
+async function reportNativeModels({ root, entries, port = PORT, signal, request = fetch }) {
+  if (!Array.isArray(entries) || !entries.length) return false;
+  const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(2000)]) : AbortSignal.timeout(2000);
+  const base = 'http://127.0.0.1:' + port;
+  const read = async url => {
+    const response = await request(url, { signal: timeout, redirect: 'error' });
+    if (!response.ok) throw new Error('native_catalog_unavailable');
+    const chunks = []; let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) throw new Error('native_catalog_too_large');
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  };
+  const health = await read(base + '/health');
+  const expected = runtimeIdentity(root);
+  if (health.service !== expected.service || health.rootId !== expected.rootId || !health.instanceId || health.nativeModelsProtocol !== 1) throw new Error('native_catalog_identity');
+  const control = JSON.parse(fs.readFileSync(controlFile(root), 'utf8'));
+  if (control.rootId !== health.rootId || control.instanceId !== health.instanceId || control.sourceId !== health.sourceId || !/^[a-f0-9]{64}$/.test(control.token || '')) throw new Error('native_catalog_identity');
+  const response = await request(base + '/_runtime/native-models', {
+    method: 'POST', signal: timeout,
+    headers: { authorization: 'Bearer ' + control.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ models: entries }),
+  });
+  if (!response.ok) throw new Error('native_catalog_unavailable');
+  const data = await response.json();
+  if (data.recorded !== true || data.instanceId !== health.instanceId) throw new Error('native_catalog_identity');
+  return true;
+}
+module.exports = { readNativeModels, reportNativeModels };
