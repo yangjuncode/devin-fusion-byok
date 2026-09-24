@@ -270,8 +270,18 @@ async function activate(context) {
     if (generation !== activationGeneration || config().enabled === false) return;
     const native = vscode.extensions.getExtension('codeium.windsurf');
     if (!native) throw new Error('未找到 Devin 原生扩展');
+    // IDE 窗口内走官方模型的 GetChatMessage 经 LS 桥透传：挂被动观测器，
+    // 记录经 POST /_runtime/monitor/record 交回后端监控，与 BYOK 记录同表。
+    const observeChat = info => {
+      try {
+        const { createNativeTracker } = require('./runtime/monitor.cjs');
+        return createNativeTracker({ ...info, onFinish: record => {
+          void require('./runtime/monitor-client.cjs').postMonitorRecord({ root, record }).catch(() => {});
+        } });
+      } catch { return null; }
+    };
     const injected = await installLsInjection({ nativeMainPath: path.resolve(native.extensionPath, native.packageJSON.main),
-      createBridge: port => createLsBridge(port, { getCatalog: catalog, log, onNativeModels: observeNativeModels }), log });
+      createBridge: port => createLsBridge(port, { getCatalog: catalog, log, onNativeModels: observeNativeModels, observeChat }), log });
     if (generation !== activationGeneration || config().enabled === false || activationDisposed) {
       try { await injected.dispose(); } catch {}
       return;

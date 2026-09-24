@@ -14,6 +14,8 @@ function countOwn(value, depth = 0) {
   return 0;
 }
 const CATALOG = /^\/exa\.(?:language_server_pb\.LanguageServerService|api_server_pb\.ApiServerService|seat_management_pb\.SeatManagementService)\/(?:GetUserStatus|GetCliModelConfigs|GetCascadeModelConfigs|GetCommandModelConfigs)$|^\/exa\.seat_management_pb\.SeatManagementService\/GetCliTeamSettings$/;
+const CHAT = /\/GetChatMessage(?:\?|$)/u;
+const OBSERVE_MAX_BODY = 64 * 1024 * 1024;
 function cors(request) {
   const origin = request.headers.origin;
   return origin && /^(?:vscode-file:\/\/vscode-app|vscode-webview:\/\/[^/]+|https?:\/\/(?:[a-z0-9.-]+\.)?localhost(?::\d+)?)$/.test(origin)
@@ -24,7 +26,17 @@ async function collect(stream, limit = 64 * 1024 * 1024) {
   for await (const chunk of stream) { length += chunk.length; if (length > limit) throw new Error('Message too large'); chunks.push(chunk); }
   return Buffer.concat(chunks, length);
 }
-function forward(request, response, target, { body, getCatalog, log = () => {}, onFusionStatus, onNativeModels } = {}) {
+function forward(request, response, target, { body, getCatalog, log = () => {}, onFusionStatus, onNativeModels, observeChat } = {}) {
+  const t0 = performance.now();
+  const startedAt = new Date().toISOString();
+  const observed = typeof observeChat === 'function' && CHAT.test(target.pathname);
+  const requestChunks = observed && body === undefined ? [] : null;
+  let requestLength = 0;
+  if (requestChunks) {
+    request.on('data', chunk => {
+      if (requestLength + chunk.length <= OBSERVE_MAX_BODY) { requestChunks.push(chunk); requestLength += chunk.length; }
+    });
+  }
   const headers = { ...request.headers, host: target.host };
   delete headers['proxy-connection'];
   if (body !== undefined) {
@@ -33,7 +45,29 @@ function forward(request, response, target, { body, getCatalog, log = () => {}, 
   }
   const outbound = (target.protocol === 'https:' ? https : http).request(target, { method: request.method, headers }, async upstream => {
     if (!CATALOG.test(target.pathname) || upstream.statusCode !== 200 || !getCatalog) {
-      response.writeHead(upstream.statusCode, { ...upstream.headers, ...cors(request) }); upstream.pipe(response); return;
+      let tracker = null;
+      if (observed) {
+        try {
+          tracker = observeChat({ request, response, upstream, t0, startedAt, requestHeaders: request.headers,
+            requestBody: body !== undefined ? Buffer.from(body) : requestChunks?.length ? Buffer.concat(requestChunks) : null });
+        } catch { tracker = null; }
+      }
+      response.writeHead(upstream.statusCode, { ...upstream.headers, ...cors(request) });
+      if (tracker) {
+        let ended = false;
+        const finish = state => {
+          if (ended) return;
+          ended = true;
+          // 上游出错而客户端已断开时按取消记录，否则才是上游错误。
+          if (state === 'error' && response.destroyed && !response.writableFinished) state = 'abort';
+          try { tracker.finish?.(state, upstream.statusCode); } catch { /* 观测失败不影响转发。 */ }
+        };
+        upstream.on('data', chunk => { try { tracker.data?.(chunk); } catch { /* 同上。 */ } });
+        upstream.once('end', () => finish('end'));
+        upstream.once('error', () => finish('error'));
+        response.once('close', () => finish(response.writableFinished ? 'end' : 'abort'));
+      }
+      upstream.pipe(response); return;
     }
     try {
       const original = await collect(upstream); let outgoing = original;

@@ -35,6 +35,19 @@ async function readMonitor({ root, port = PORT, signal, request = fetch }) {
   if (!data.snapshot) return { status: 'unavailable', snapshot: null };
   return { status: 'ready', snapshot: publicSnapshot(data.snapshot) };
 }
+// 上报一条记录到本机后端（IDE 窗口 LS 桥观测到的官方转发调用经此入监控）。
+// 令牌每次从 control 文件读取，随后端轮换自动更新；服务不在或拒绝时静默失败。
+async function postMonitorRecord({ root, port = PORT, record, request = fetch }) {
+  const control = JSON.parse(fs.readFileSync(controlFile(root), 'utf8'));
+  if (!/^[a-f0-9]{64}$/.test(control.token || '')) throw new Error('monitor_identity');
+  const response = await request('http://127.0.0.1:' + port + '/_runtime/monitor/record', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + control.token, 'content-type': 'application/json' },
+    body: JSON.stringify(record),
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!response.ok) throw new Error('monitor_record_failed');
+}
 function metricOf(metric) {
   if (!metric || typeof metric !== 'object' || Array.isArray(metric)) return null;
   const copy = {};
@@ -72,4 +85,4 @@ function publicSnapshot(snapshot) {
     records: snapshot.records.map(recordOf).filter(Boolean), summary,
     sessions: snapshot.sessions.map(sessionOf).filter(Boolean) };
 }
-module.exports = { readMonitor, MAX_SNAPSHOT_BYTES, publicSnapshot };
+module.exports = { readMonitor, postMonitorRecord, MAX_SNAPSHOT_BYTES, publicSnapshot };

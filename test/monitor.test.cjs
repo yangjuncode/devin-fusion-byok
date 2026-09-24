@@ -116,3 +116,54 @@ test('persists private-safe records, resolves real SQLite IDs read-only and surv
   const missing = await createMonitor({ root, databasePath: path.join(root, 'missing.db') }).snapshot();
   assert.equal(missing.sessionStatus, 'unavailable'); assert.equal(missing.records[0].sessionId, null);
 });
+
+test('native tracker parses forwarded chat frames and keeps the response message id', () => {
+  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
+  const wire = require('../src/protocol/wire.cjs');
+  const { textChunk, toolChunk, stopChunk } = require('../src/protocol/chat.cjs');
+  let record = null;
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+    requestHeaders: { 'content-type': 'application/proto' },
+    requestBody: wire.s(21, 'swe-2-max'),
+    onFinish: r => { record = r; },
+  });
+  const stream = Buffer.concat([
+    wire.frame(textChunk('msg-9', 'hello')),
+    wire.frame(toolChunk('msg-9', [{ id: 'call-1', name: 'exec', arguments: '{}' }])),
+    wire.frame(stopChunk('msg-9', 10, 'swe-2-max')),
+    wire.frame(Buffer.from('{}'), 2),
+  ]);
+  tracker.data(stream.subarray(0, 3));
+  tracker.data(stream.subarray(3, 20));
+  tracker.data(stream.subarray(20));
+  const result = tracker.finish('end', 200);
+  assert.equal(record, result);
+  assert.equal(result.id, 'msg-9');
+  assert.equal(result.model, 'swe-2-max');
+  assert.equal(result.providerId, 'official');
+  assert.equal(result.status, 'success');
+  assert.equal(result.hasTools, true);
+  assert.deepEqual(result.toolIds, ['call-1']);
+  assert.equal(result.httpStatus, 200);
+  assert.ok(result.durationMs >= 0 && result.firstResponseMs !== null && result.firstTextMs !== null);
+});
+
+test('native tracker falls back to stream uid and marks aborts cancelled', () => {
+  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
+  const wire = require('../src/protocol/wire.cjs');
+  const { stopChunk } = require('../src/protocol/chat.cjs');
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+  });
+  tracker.data(wire.frame(stopChunk('m2', 2, 'gpt-5-6-sol-high')));
+  const aborted = tracker.finish('abort', 200);
+  assert.equal(aborted.status, 'cancelled');
+  assert.equal(aborted.code, 'client_cancelled');
+  assert.equal(aborted.model, 'gpt-5-6-sol-high');
+  const tracker2 = createNativeTracker({ upstream: { statusCode: 429, headers: {} } });
+  const failed = tracker2.finish('end', 429);
+  assert.equal(failed.status, 'error');
+  assert.equal(failed.code, 'official_http');
+  assert.equal(failed.model, 'official');
+});

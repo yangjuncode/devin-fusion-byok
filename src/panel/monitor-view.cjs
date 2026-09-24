@@ -1,6 +1,6 @@
 'use strict';
 function monitorMarkup() {
-  return `<details id="usage-monitor" class="card fusion-card" open><summary class="card-head">用量与性能</summary><div class="card-content"><p class="hint">仅统计安装监控后经过 BYOK 的最近 5,000 次请求。网关指标为主：首响应是从请求开始到收到上游第一段已解析 SSE 数据（可能是元数据或错误，不是 HTTP 响应头，也不算心跳空行）；输出 TPS（网关）用已上报输出 token ÷（总耗时 − 首响应），包含推理与工具调用。正文指标为辅：正文 TPS 按首段正文到模型完成计时，扣除已上报推理 token，含工具调用的请求不计算。缓存与推理是输出／输入的子项，不重复计入。角色尚未可靠识别，不猜测 Lead／Sidekick。</p><div class="toolbar space-top"><select id="monitor-session" aria-label="选择监控会话"><option value="all">全部会话</option></select><button id="monitor-refresh" type="button">刷新统计</button></div><p id="monitor-status" class="hint" role="status">正在读取监控…</p><div id="monitor-summary" class="space-top"></div><div class="monitor-table-wrap space-top"><table class="monitor-table"><thead><tr><th>开始时间</th><th>模型／档位</th><th>状态</th><th>用量</th><th>首响应 ms</th><th>输出 TPS（网关）</th><th>输入</th><th>输出</th><th>缓存命中</th><th>推理</th><th>首输出 ms</th><th>正文首字 ms</th><th>正文 TPS</th><th>请求吞吐 TPS</th><th>总耗时 ms</th><th>会话关联</th></tr></thead><tbody id="monitor-requests"></tbody></table></div><p class="hint space-top">未提供 ≠ 0。汇总显示已上报用量及覆盖请求数；失败或取消可能缺少最终用量。只按输出消息或本次工具调用 ID 确认会话，不再猜测历史消息归属；有歧义或无法确认的请求留在未归属。旧版记录保留 token 用量，但没有首响应与网关时序，显示“未提供”，也不补算正文 TPS。用量与请求状态分开显示：状态说明请求成败，用量说明上报是否完整。</p></div></details>`;
+  return `<details id="usage-monitor" class="card fusion-card" open><summary class="card-head">用量与性能</summary><div class="card-content"><p class="hint">统计安装监控后经过本插件连接的最近 5,000 次请求，含 BYOK 与标记“官方”的转发请求。官方转发的 token 用量协议未上报，只记录模型、状态与耗时。网关指标为主：首响应是从请求开始到收到上游第一段已解析 SSE 数据（可能是元数据或错误，不是 HTTP 响应头，也不算心跳空行）；输出 TPS（网关）用已上报输出 token ÷（总耗时 − 首响应），包含推理与工具调用。正文指标为辅：正文 TPS 按首段正文到模型完成计时，扣除已上报推理 token，含工具调用的请求不计算。缓存与推理是输出／输入的子项，不重复计入。角色尚未可靠识别，不猜测 Lead／Sidekick。</p><div class="toolbar space-top"><select id="monitor-session" aria-label="选择监控会话"><option value="all">全部会话</option></select><button id="monitor-refresh" type="button">刷新统计</button></div><p id="monitor-status" class="hint" role="status">正在读取监控…</p><div id="monitor-summary" class="space-top"></div><div class="monitor-table-wrap space-top"><table class="monitor-table"><thead><tr><th>开始时间</th><th>模型／档位</th><th>状态</th><th>用量</th><th>首响应 ms</th><th>输出 TPS（网关）</th><th>输入</th><th>输出</th><th>缓存命中</th><th>推理</th><th>首输出 ms</th><th>正文首字 ms</th><th>正文 TPS</th><th>请求吞吐 TPS</th><th>总耗时 ms</th><th>会话关联</th></tr></thead><tbody id="monitor-requests"></tbody></table></div><p class="hint space-top">未提供 ≠ 0。汇总显示已上报用量及覆盖请求数；失败或取消可能缺少最终用量。只按输出消息或本次工具调用 ID 确认会话，不再猜测历史消息归属；有歧义或无法确认的请求留在未归属。旧版记录保留 token 用量，但没有首响应与网关时序，显示“未提供”，也不补算正文 TPS。用量与请求状态分开显示：状态说明请求成败，用量说明上报是否完整。</p></div></details>`;
 }
 function monitorScript() {
   return `
@@ -23,7 +23,8 @@ function monitorScript() {
       if (!selected) return;
       const s = selected.summary;
       const count = document.createElement('p');
-      count.textContent = '请求 ' + s.requests + ' · 成功 ' + s.success + ' · 失败 ' + s.error + ' · 取消 ' + s.cancelled;
+      const officialCount = selected.records.filter(r => r.providerId === 'official').length;
+      count.textContent = '请求 ' + s.requests + (officialCount ? '（其中官方 ' + officialCount + '）' : '') + ' · 成功 ' + s.success + ' · 失败 ' + s.error + ' · 取消 ' + s.cancelled;
       summary.append(count);
       for (const [key, label] of METRICS) {
         const metric = s[key]; const item = document.createElement('span');
@@ -33,7 +34,7 @@ function monitorScript() {
       }
       for (const r of selected.records) {
         const row = document.createElement('tr');
-        const values = [r.startedAt, r.model + (r.effort ? ' / ' + r.effort : ''), stateName(r.status), usageName(r.usageState), ...FIELDS.map(k => format(r[k])), attribution(r.attribution)];
+        const values = [r.startedAt, (r.providerId === 'official' ? '官方 · ' : '') + r.model + (r.effort ? ' / ' + r.effort : ''), stateName(r.status), usageName(r.usageState), ...FIELDS.map(k => format(r[k])), attribution(r.attribution)];
         for (const value of values) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
         row.title = '请求 ID：' + r.id + (r.code ? ' · ' + r.code : ''); rows.append(row);
       }

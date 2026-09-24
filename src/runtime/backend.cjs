@@ -71,10 +71,11 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
   const identity = runtimeIdentity(root);
   const instanceId = crypto.randomUUID();
   const controlToken = crypto.randomBytes(32).toString('hex');
-  let monitor;
+  let monitor, createNativeTracker;
   try {
-    const { createMonitor } = require('./monitor.cjs');
-    monitor = createMonitor({ root });
+    const mod = require('./monitor.cjs');
+    monitor = mod.createMonitor({ root });
+    createNativeTracker = mod.createNativeTracker;
   } catch { log('monitor-unavailable'); }
   const recordMetrics = data => {
     if (!monitor) return;
@@ -134,7 +135,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
     if (request.method !== 'POST' || ![API_PREFIX + 'AssignModel', API_PREFIX + 'GetChatMessage'].includes(rpc)) {
       forward(request, response, target, { getCatalog, log, onFusionStatus, onNativeModels }); return;
     }
-    let body;
+    let body, chat;
     try {
       body = await collect(request);
       const format = wire.decode(body, request.headers);
@@ -150,7 +151,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
           return;
         }
       } else {
-        const chat = parseChat(format.data);
+        chat = parseChat(format.data);
         const route = Object.hasOwn(catalog.routes, chat.modelUid) ? catalog.routes[chat.modelUid] : autoByokRoute(current, chat);
         if (route) {
           const provider = current.providers.find(p => p.id === route.providerId);
@@ -168,7 +169,15 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
       if (response.headersSent) { response.end(); return; }
       // Malformed data must never select a default provider.
     }
-    if (body) forward(request, response, target, { body, getCatalog, log, onFusionStatus, onNativeModels });
+    // 未命中自有供应商的 GetChatMessage 照常转发官方，同时挂被动观测器记录
+    // 模型与耗时，便于区分 BYOK 与官方调用。其余 RPC 不受影响。
+    const observeChat = monitor && typeof createNativeTracker === 'function'
+      ? info => {
+          try { return createNativeTracker({ ...info, modelUid: chat?.modelUid || '', onFinish: recordMetrics }); }
+          catch { return null; }
+        }
+      : undefined;
+    if (body) forward(request, response, target, { body, getCatalog, log, onFusionStatus, onNativeModels, observeChat });
     else { response.writeHead(502); response.end(); }
   };
   const server = http.createServer((request, response) => {
@@ -198,6 +207,21 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
       }
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ instanceId, models: [...observedNatives.values()] })); return;
+    }
+    if (request.method === 'POST' && request.url === '/_runtime/monitor/record') {
+      const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';
+      const expected = 'Bearer ' + controlToken;
+      if (Buffer.byteLength(provided) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+        response.writeHead(403); response.end(); return;
+      }
+      Promise.resolve().then(() => collect(request, 256 * 1024)).then(body => {
+        const data = JSON.parse(body.toString('utf8'));
+        monitor?.record(data);
+        if (response.destroyed) return;
+        response.writeHead(202, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end('{"recorded":true}');
+      }).catch(() => { if (!response.destroyed) { response.writeHead(400); response.end(); } });
+      return;
     }
     if (request.method === 'POST' && request.url === '/_runtime/shutdown') {
       const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';

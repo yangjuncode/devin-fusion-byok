@@ -35,6 +35,12 @@ async function fixture(t) {
           const body = options.body ?? await collect(req);
           forwarded.push({ target: target.href, body });
           if (natives && /ModelConfigs|GetUserStatus/.test(req.url)) options.onNativeModels?.(natives);
+          if (/GetChatMessage/.test(req.url) && typeof options.observeChat === 'function') {
+            const tracker = options.observeChat({ request: req, response: res,
+              upstream: { statusCode: 200, headers: { 'content-type': 'text/plain' } },
+              requestHeaders: req.headers, requestBody: body, t0: 0, startedAt: new Date().toISOString() });
+            tracker?.finish('end', 200);
+          }
           if (hold) held.set(req.url, res);
           else { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('official'); }
         },
@@ -88,6 +94,36 @@ test('monitor is authenticated, origin-blocked, and client validates runtime ide
   const result = await readMonitor({ root: f.root, port: f.backend.port });
   assert.equal(result.status, 'ready'); assert.equal(result.snapshot.summary.requests, 0);
   await assert.rejects(readMonitor({ root: f.root + '-wrong', port: f.backend.port }), /identity/);
+});
+
+test('monitor record endpoint stores authenticated native observations only', async t => {
+  const f = await fixture(t);
+  const endpoint = f.base + '/_runtime/monitor/record';
+  const headers = { authorization: 'Bearer ' + f.control().token, 'content-type': 'application/json' };
+  assert.equal((await fetch(endpoint, { method: 'POST', headers, body: '{bad' })).status, 400);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: { ...headers, authorization: 'Bearer wrong' },
+    body: '{}' })).status, 403);
+  const record = { schemaVersion: 3, id: 'native-msg-1', startedAt: new Date().toISOString(), model: 'swe-2-max',
+    providerId: 'official', status: 'success', httpStatus: 200, durationMs: 5, messageIds: [], toolIds: [] };
+  assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(record) })).status, 202);
+  const data = await (await fetch(f.base + '/_runtime/monitor', { headers })).json();
+  const saved = data.snapshot.records.find(r => r.id === 'native-msg-1');
+  assert.equal(saved.providerId, 'official');
+  assert.equal(saved.model, 'swe-2-max');
+});
+
+test('forwarded GetChatMessage requests are recorded as official calls', async t => {
+  const f = await fixture(t);
+  const response = await fetch(f.base + API + 'GetChatMessage', { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ modelUid: 'swe-2-max', messages: [] }) });
+  assert.equal(await response.text(), 'official');
+  const headers = { authorization: 'Bearer ' + f.control().token };
+  const data = await (await fetch(f.base + '/_runtime/monitor', { headers })).json();
+  const record = data.snapshot.records.find(r => r.providerId === 'official');
+  assert.ok(record, 'forwarded chat should leave an official record');
+  assert.equal(record.model, 'swe-2-max');
+  assert.equal(record.status, 'success');
+  assert.equal(record.httpStatus, 200);
 });
 
 test('safe shutdown refuses active RPCs and stops only after the complete response', async t => {

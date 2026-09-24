@@ -2,7 +2,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { execFile } = require('node:child_process');
+const wire = require('../protocol/wire.cjs');
 const LIMIT = 5000;
 const token = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const timing = value => Number.isFinite(value) && value >= 0 ? value : null;
@@ -138,6 +141,99 @@ function summarize(records) {
   result.throughputTps = { value: duration > 0 ? throughput.reduce((n, r) => n + r.outputTokens, 0) * 1000 / duration : null, samples: throughput.length };
   return result;
 }
+const NATIVE_STREAM_MAX = 64 * 1024 * 1024;
+// 官方 GetChatMessage 转发请求的被动观测器：不改动任何字节，只增量解析
+// Connect 帧中已公开的字段（1=消息 id，3=正文，5=结束原因，6=工具调用，
+// 9=推理，20=模型 uid）。官方协议没有可靠的 token 字段，用量按“未上报”。
+function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid = '', t0, startedAt, now = () => performance.now(), onFinish } = {}) {
+  const start = Number.isFinite(t0) ? t0 : now();
+  const fallbackId = crypto.randomUUID();
+  const contentType = String(upstream?.headers?.['content-type'] || '').toLowerCase();
+  const framed = contentType.includes('connect+') || contentType.includes('grpc');
+  const gzChunks = /gzip/.test(String(upstream?.headers?.['content-encoding'] || '').toLowerCase()) ? [] : null;
+  let pending = Buffer.alloc(0);
+  let firstResponse = null, firstText = null, firstOutput = null, lastOutput = null;
+  let messageId = '', responseModelUid = '', trailerCode = null;
+  let hasTools = false, hasReasoning = false, finished = false;
+  const toolIds = new Set();
+
+  let uid = identifier(modelUid) || '';
+  if (!uid && requestBody) {
+    try {
+      const format = wire.decode(requestBody, requestHeaders);
+      if (Buffer.isBuffer(format.data)) uid = identifier(wire.str(format.data, 21)) || '';
+      else if (format.data && typeof format.data === 'object') {
+        uid = identifier(format.data.chatModelUid ?? format.data.chat_model_uid ?? format.data.modelUid ?? format.data.model_uid) || '';
+      }
+    } catch { /* 解析不出模型名时仍记录这次官方调用。 */ }
+  }
+
+  function message(buffer) {
+    let fields;
+    try { fields = wire.parseFields(buffer); } catch { return; }
+    const elapsed = now() - start;
+    for (const field of fields) {
+      if (field.wire !== 2) continue;
+      if (field.number === 1) { if (!messageId) messageId = identifier(field.value.toString('utf8')) || ''; }
+      else if (field.number === 3 && field.value.length) { firstText ??= elapsed; firstOutput ??= elapsed; lastOutput = elapsed; }
+      else if (field.number === 9 && field.value.length) { hasReasoning = true; firstOutput ??= elapsed; lastOutput = elapsed; }
+      else if (field.number === 6) {
+        hasTools = true; firstOutput ??= elapsed; lastOutput = elapsed;
+        try { const tid = identifier(wire.str(field.value, 1)); if (tid) toolIds.add(tid); } catch {}
+      } else if (field.number === 20) responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
+    }
+  }
+
+  function drain() {
+    while (pending.length >= 5) {
+      const length = pending.readUInt32BE(1);
+      if (pending.length < 5 + length) return;
+      const flags = pending[0];
+      const part = pending.subarray(5, 5 + length);
+      pending = pending.subarray(5 + length);
+      if (flags & 2) {
+        try { const code = JSON.parse(part.toString('utf8'))?.error?.code; if (identifier(code)) trailerCode = code; } catch {}
+        continue;
+      }
+      let body = part;
+      if (flags & 1) { try { body = zlib.gunzipSync(body, { maxOutputLength: NATIVE_STREAM_MAX }); } catch { continue; } }
+      message(body);
+    }
+  }
+
+  function data(chunk) {
+    if (finished) return;
+    if (firstResponse === null) firstResponse = now() - start;
+    if (gzChunks) { gzChunks.push(Buffer.from(chunk)); return; }
+    if (!framed) return;
+    pending = pending.length ? Buffer.concat([pending, chunk]) : Buffer.from(chunk);
+    if (pending.length > NATIVE_STREAM_MAX) { pending = Buffer.alloc(0); return; }
+    drain();
+  }
+
+  function finish(state, httpStatus) {
+    if (finished) return null;
+    finished = true;
+    if (gzChunks?.length) {
+      try {
+        pending = zlib.gunzipSync(Buffer.concat(gzChunks), { maxOutputLength: NATIVE_STREAM_MAX });
+        if (framed) drain(); else message(pending);
+      } catch { /* 解压失败只丢失字段解析，不影响状态与耗时。 */ }
+    }
+    const status = state === 'abort' ? 'cancelled' : state === 'end' && (httpStatus || 200) < 400 ? 'success' : 'error';
+    const code = status === 'success' ? null : state === 'abort' ? 'client_cancelled' : trailerCode || (httpStatus >= 400 ? 'official_http' : 'upstream_stream');
+    const record = { schemaVersion: 3, id: messageId || fallbackId, startedAt: startedAt || new Date().toISOString(),
+      model: uid || responseModelUid || 'official', providerId: 'official', effort: null,
+      status, code, httpStatus: httpStatus || 0, firstResponseMs: firstResponse, firstOutputMs: firstOutput, firstTextMs: firstText,
+      durationMs: Math.max(0, now() - start),
+      outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
+      hasTools, hasReasoning, toolIds: [...toolIds].slice(-32), messageIds: [] };
+    try { onFinish?.(record); } catch { /* 统计失败不影响转发。 */ }
+    return record;
+  }
+  return { data, finish };
+}
+
 const quote = value => "'" + value.replace(/'/g, "''") + "'";
 async function sessionMatches(databasePath, ids, toolIds = []) {
   if (!ids.length && !toolIds.length) return [];
@@ -224,4 +320,4 @@ function createMonitor({ root, databasePath = path.join(os.homedir(), '.local/sh
   }
   return { record, snapshot, close() {} };
 }
-module.exports = { createMonitor, createTracker, usageOf, semanticOutput, summarize, associate };
+module.exports = { createMonitor, createTracker, createNativeTracker, usageOf, semanticOutput, summarize, associate };

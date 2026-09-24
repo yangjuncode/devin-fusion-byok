@@ -226,3 +226,55 @@ test('the first catalog response binds official Sidekick dimensions and unlocks 
   assert.equal(emitted.label, 'gpt-5-6-luna-high');
   assert.match(emitted.modelInfo.modelFamilyUid, /^dfbyok-preset-family-/);
 });
+
+test('observeChat taps forwarded chat streams without altering request or response bytes', async t => {
+  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
+  const { textChunk, toolChunk, stopChunk } = require('../src/protocol/chat.cjs');
+  const payload = Buffer.concat([
+    wire.frame(textChunk('m1', 'hi')),
+    wire.frame(toolChunk('m1', [{ id: 'call-7', name: 'exec', arguments: '{}' }])),
+    wire.frame(stopChunk('m1', 10, 'swe-2-max')),
+    wire.frame(Buffer.from('{}'), 2),
+  ]);
+  const requestBody = wire.s(21, 'swe-2-max');
+  const native = await listen(async (req, res) => {
+    assert.deepEqual(await collect(req), requestBody);
+    res.writeHead(200, { 'content-type': 'application/connect+proto' });
+    res.write(payload.subarray(0, 7)); res.end(payload.subarray(7));
+  });
+  t.after(() => native.close());
+  const records = [];
+  const bridge = await createLsBridge(native.port, { getCatalog: () => catalog,
+    observeChat: info => createNativeTracker({ ...info, onFinish: r => records.push(r) }) });
+  t.after(() => bridge.close());
+  const response = await request(bridge.port, '/exa.api_server_pb.ApiServerService/GetChatMessage', {
+    body: requestBody, headers: { 'content-type': 'application/proto' } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, payload);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].model, 'swe-2-max');
+  assert.equal(records[0].providerId, 'official');
+  assert.equal(records[0].status, 'success');
+  assert.equal(records[0].id, 'm1');
+  assert.equal(records[0].hasTools, true);
+  assert.deepEqual(records[0].toolIds, ['call-7']);
+});
+
+test('observeChat ignores non-chat RPCs and survives observer failures', async t => {
+  const native = await listen(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(await collect(req));
+  });
+  t.after(() => native.close());
+  let calls = 0;
+  const bridge = await createLsBridge(native.port, { getCatalog: () => catalog,
+    observeChat: () => { calls++; throw new Error('observer exploded'); } });
+  t.after(() => bridge.close());
+  const other = await request(bridge.port, LS + 'Heartbeat', { body: Buffer.from('x') });
+  assert.equal(other.status, 200);
+  assert.equal(calls, 0, 'non-chat RPCs must not create observers');
+  const chat = await request(bridge.port, '/exa.api_server_pb.ApiServerService/GetChatMessage', { body: Buffer.from('y') });
+  assert.equal(chat.status, 200);
+  assert.equal(chat.body.toString(), 'y');
+  assert.equal(calls, 1, 'observer failure must not break forwarding');
+});
