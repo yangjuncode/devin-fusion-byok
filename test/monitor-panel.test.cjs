@@ -19,8 +19,13 @@ test('monitor browser script compiles, uses text nodes, and preserves zero versu
   let receive;
   vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} } });
   const record = { id: 'id', startedAt: 'now', model: '<img onerror=alert(1)>', status: 'success', inputTokens: 0, outputTokens: null, usageComplete: false, attribution: 'unassigned' };
-  receive({ data: { type: 'monitor-state', result: { snapshot: { summary: { requests: 1, success: 1, error: 0, cancelled: 0 }, records: [record], sessions: [], sessionStatus: 'ready' } } } });
+  const timed = { id: 'id2', startedAt: '2026-09-24T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
+  receive({ data: { type: 'monitor-state', result: { snapshot: { summary: { requests: 2, success: 2, error: 0, cancelled: 0 }, records: [record, timed], sessions: [], sessionStatus: 'ready' } } } });
   const cells = byId('monitor-requests').children[0].children;
+  assert.equal(cells[0].textContent, 'now', '无法解析的时间原样显示');
+  const timedCells = byId('monitor-requests').children[1].children;
+  assert.equal(timedCells[0].textContent, new Date('2026-09-24T00:00:00.000Z').toLocaleString('zh-CN', { hour12: false }),
+    'UTC ISO 时间按本地时区渲染');
   assert.equal(cells[1].textContent, '<img onerror=alert(1)>');
   assert.equal(cells[6].textContent, '0'); assert.equal(cells[7].textContent, '未提供');
   assert.equal(cells[4].textContent, '未提供'); assert.equal(cells[5].textContent, '未提供');

@@ -11,6 +11,8 @@ function monitorScript() {
     const summary = document.getElementById('monitor-summary');
     const rows = document.getElementById('monitor-requests');
     const format = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '未提供';
+    // 记录里的 startedAt 是 UTC ISO 串，列表按浏览器本地时区显示；无法解析时原样展示。
+    const localTime = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value ?? '未提供') : date.toLocaleString('zh-CN', { hour12: false }); };
     const attribution = value => ({ 'response-id': '输出 ID 确认', 'tool-id': '本次工具 ID 确认', ambiguous: '存在歧义', unassigned: '未归属' }[value] || '未知');
     const stateName = value => ({ success: '成功', error: '失败', cancelled: '已取消' }[value] || '未知');
     const usageName = value => ({ complete: '完整', partial: '不完整', missing: '未上报', inconsistent: '数据异常（缓存或推理超过总数）' }[value] || '未提供');
@@ -34,7 +36,7 @@ function monitorScript() {
       }
       for (const r of selected.records) {
         const row = document.createElement('tr');
-        const values = [r.startedAt, (r.providerId === 'official' ? '官方 · ' : '') + r.model + (r.effort ? ' / ' + r.effort : ''), stateName(r.status), usageName(r.usageState), ...FIELDS.map(k => format(r[k])), attribution(r.attribution)];
+        const values = [localTime(r.startedAt), (r.providerId === 'official' ? '官方 · ' : '') + r.model + (r.effort ? ' / ' + r.effort : ''), stateName(r.status), usageName(r.usageState), ...FIELDS.map(k => format(r[k])), attribution(r.attribution)];
         for (const value of values) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
         row.title = '请求 ID：' + r.id + (r.code ? ' · ' + r.code : ''); rows.append(row);
       }
