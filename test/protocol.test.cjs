@@ -525,8 +525,16 @@ test('Codex 专线供应商注入 Responses Lite 身份头与必需字段', asyn
   assert.ok(upstream.headers['x-codex-turn-metadata'].includes('"session_id":"' + upstream.body.prompt_cache_key + '"'));
   assert.deepEqual(upstream.body.include, ['reasoning.encrypted_content']);
   assert.equal(upstream.body.store, false);
+  assert.equal(upstream.body.parallel_tool_calls, false);
+  assert.deepEqual(upstream.body.reasoning, { effort: 'high', summary: 'auto', context: 'all_turns' });
   assert.equal(upstream.body.max_output_tokens, undefined, 'Codex 契约不带 max_output_tokens');
   assert.match(upstream.body.prompt_cache_key, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test('Codex 专线未设档位时仍发送 reasoning.context 与 parallel_tool_calls', () => {
+  const body = buildRequestBody(parseChat(nativeRequest()), { model: 'm' }, { apiFormat: 'openai-responses', unlockKind: 'codex' });
+  assert.deepEqual(body.reasoning, { context: 'all_turns' });
+  assert.equal(body.parallel_tool_calls, false);
 });
 
 test('Codex 专线 prompt_cache_key 按会话首条 user 输入保持稳定', () => {
@@ -557,6 +565,8 @@ test('Codex 专线始终走 Responses 契约，不被 apiFormat 误分发', asyn
   assert.equal(upstream.headers['session-id'], upstream.body.prompt_cache_key);
   assert.deepEqual(upstream.body.include, ['reasoning.encrypted_content']);
   assert.equal(upstream.body.store, false);
+  assert.equal(upstream.body.reasoning.context, 'all_turns');
+  assert.equal(upstream.body.parallel_tool_calls, false);
 });
 
 test('普通供应商不携带 Codex 身份头与字段', async t => {

@@ -52,10 +52,15 @@ function buildCodexPromptCacheKey(input) {
 
 // Codex Responses 必需字段：include 固定为 reasoning.encrypted_content，
 // store:false 避免上游持久化（部分第三方网关开启 store 会触盘/报错）。
+// Responses Lite 契约另外要求 reasoning.context=all_turns 与
+// parallel_tool_calls=false，缺失会被上游按 400 拒绝；context 与已有
+// effort/summary 合并，不覆盖档位。
 function applyCodexRequiredFields(body) {
   body.include = ['reasoning.encrypted_content'];
   body.prompt_cache_key = buildCodexPromptCacheKey(body.input);
   body.store = false;
+  body.parallel_tool_calls = false;
+  body.reasoning = { ...(body.reasoning ?? {}), context: 'all_turns' };
   return body;
 }
 

@@ -8,7 +8,7 @@
 
 安装 VSIX 后，新建 Devin 窗口。点击右下角状态栏 **Fusion BYOK**，或按 `⌘⇧P` 运行 **Fusion BYOK：控制面板**。
 
-控制面板支持添加、编辑、停用和删除多个供应商。填写供应商名称、兼容 API 地址、密钥，并选择 Responses 或 Chat Completions；编辑时密钥留空会保留原值，页面不会回显已保存的密钥。使用 cliproxyapi 等 Codex 网关专线时勾选 **Codex 专线**：插件会强制走 Responses 契约，注入 Codex Responses Lite 身份头与必需字段（`include`、`prompt_cache_key`、`store: false`，且不带 `max_output_tokens`），缺少这些会被网关按 503 拒绝；`prompt_cache_key` 按会话首条输入保持稳定以命中上游会话亲和，身份头中的会话标识与之对齐。普通渠道请勿开启。
+控制面板支持添加、编辑、停用和删除多个供应商。填写供应商名称、兼容 API 地址、密钥，并选择 Responses 或 Chat Completions；编辑时密钥留空会保留原值，页面不会回显已保存的密钥。使用 cliproxyapi 等 Codex 网关专线时勾选 **Codex 专线**：插件会强制走 Responses 契约，注入 Codex Responses Lite 身份头与必需字段（`include`、`prompt_cache_key`、`store: false`、`reasoning.context: all_turns`、`parallel_tool_calls: false`，且不带 `max_output_tokens`），缺少这些会被网关或上游拒绝；`prompt_cache_key` 按会话首条输入保持稳定以命中上游会话亲和，身份头中的会话标识与之对齐。普通渠道请勿开启。
 
 选择供应商后，点击 **选择模型导入** 获取可用模型列表。新模型默认不勾选；搜索并勾选需要的模型，点击 **导入所选模型** 才会保存。支持全选当前搜索结果和清空选择；取消不会导入任何模型。已有模型标记为“已导入”，不会重复添加、删除或改变启停状态。
 
