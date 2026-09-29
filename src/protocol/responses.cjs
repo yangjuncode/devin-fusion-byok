@@ -4,7 +4,7 @@ const { randomUUID } = require('node:crypto');
 const { frame } = require('./wire.cjs');
 const { textChunk, thinkingChunk, toolChunk, stopChunk } = require('./chat.cjs');
 const { isCodex, applyCodexRequiredFields, codexHeaders } = require('./codex.cjs');
-const { createTracker } = require('../runtime/monitor.cjs');
+const { createTracker, usageOf } = require('../runtime/monitor.cjs');
 const MAX_SSE_BUFFER = 64 * 1024 * 1024;
 
 function isChatFormat(format = '') { return /chat[-_\/]?completions|^(?:chat|openai)$/.test(format); }
@@ -127,6 +127,7 @@ function processor(id, uid, chat, emit) {
   let terminal = false;
   let reason = 2;
   let finished = false;
+  let usage = null;
   const getCall = (index, itemId) => {
     const key = index ?? itemIndexes.get(itemId) ?? itemId;
     if (key === undefined) {
@@ -179,6 +180,8 @@ function processor(id, uid, chat, emit) {
         err.code = 'upstream_stream_error';
         throw err;
       }
+      const next = usageOf(data, chat);
+      if (next) usage = next;
       if (chat) {
         for (const choice of data.choices || []) {
           if ((choice.index ?? 0) !== 0) continue;
@@ -251,7 +254,7 @@ function processor(id, uid, chat, emit) {
         tools.push({ id: call.id, name: call.name, arguments: args });
       }
       if (tools.length) await emit(toolChunk(id, tools));
-      await emit(stopChunk(id, tools.length ? 10 : reason, uid));
+      await emit(stopChunk(id, tools.length ? 10 : reason, uid, usage));
       finished = true;
       return tools.map(tool => tool.name);
     },

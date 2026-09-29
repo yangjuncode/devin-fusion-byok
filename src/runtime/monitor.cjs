@@ -17,7 +17,8 @@ function usageOf(data, chat) {
   return {
     inputTokens: token(chat ? u.prompt_tokens : u.input_tokens),
     outputTokens: token(chat ? u.completion_tokens : u.output_tokens),
-    cachedTokens: token((chat ? u.prompt_tokens_details : u.input_tokens_details)?.cached_tokens ?? u.prompt_cache_hit_tokens),
+    cachedTokens: token((chat ? u.prompt_tokens_details : u.input_tokens_details)?.cached_tokens ?? u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens),
+    cacheWriteTokens: token(u.cache_creation_input_tokens ?? u.prompt_cache_write_tokens ?? (chat ? u.prompt_tokens_details : u.input_tokens_details)?.cache_write_tokens),
     reasoningTokens: token((chat ? u.completion_tokens_details : u.output_tokens_details)?.reasoning_tokens)
   };
 }

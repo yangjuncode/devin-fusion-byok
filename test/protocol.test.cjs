@@ -85,6 +85,35 @@ test('monitor captures usage after Chat finish_reason without duplicate output',
   assert.deepEqual(proxy.requests[0].body.stream_options, { include_usage: true });
 });
 
+test('final chunk forwards usage and delta_tokens so the agent can account context', async t => {
+  for (const [format, events] of [
+    ['openai', [
+      { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 80 } } },
+    ]],
+    ['openai-responses', [
+      { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'ok' },
+      { type: 'response.completed', response: { status: 'completed', output: [],
+        usage: { input_tokens: 100, output_tokens: 7, input_tokens_details: { cached_tokens: 80 } } } },
+    ]],
+  ]) await t.test(format, async st => {
+    const proxy = await bridge(st, async (_, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(events.map(event).join('') + (format === 'openai' ? 'data: [DONE]\n\n' : ''));
+    }, format);
+    const { messages } = unpack(Buffer.from(await (await fetch(proxy.url)).arrayBuffer()));
+    const last = messages.at(-1);
+    assert.equal(num(last, 5), 2);                    // stop reason
+    assert.equal(num(last, 4), 7);                    // delta_tokens = total output
+    const usage = fields(last, 7)[0].value;           // ModelUsageStats
+    assert.equal(num(usage, 2), 20);                  // input_tokens：100 - 80 缓存读
+    assert.equal(num(usage, 3), 7);                   // output_tokens
+    assert.equal(num(usage, 5), 80);                  // cache_read_tokens
+    assert.equal(str(usage, 9), 'local-cpa-lead');    // model_uid
+    assert.equal(str(last, 20), 'local-cpa-lead'); assert.equal(str(last, 23), 'local-cpa-lead');
+  });
+});
+
 test('protobuf retains unknown raw fields and uint64 without rounding', () => {
   const input = Buffer.concat([s(3, '模型'), v(911, 18446744073709551615n), m(300, Buffer.from([1, 2, 3]))]);
   const parsed = wire.parseFields(input);

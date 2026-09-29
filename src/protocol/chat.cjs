@@ -78,6 +78,31 @@ function thinkingChunk(id, text) { return Buffer.concat([...prefix(id), s(9, tex
 function toolChunk(id, tools) {
   return Buffer.concat([...prefix(id), ...tools.map(tool => m(6, Buffer.concat([s(1, tool.id), s(2, tool.name), s(3, tool.arguments ?? tool.arguments_json ?? '')])))]);
 }
-function stopChunk(id, reason = 2, modelUid = '') { return Buffer.concat([...prefix(id), v(5, reason), ...(modelUid ? [s(20, modelUid)] : [])]); }
+// OpenAI 口径的 prompt_tokens/input_tokens 包含 cached_tokens；原生
+// ModelUsageStats 沿用 Anthropic 语义（input 与 cache_read 互斥、合计为完整
+// prompt）。编码时减去 cache_read 部分，agent 侧的 num_tokens_preceding /
+// 压缩阈值记账才能反映真实上下文大小。
+function usageStats(usage, modelUid) {
+  const parts = [];
+  const input = usage.inputTokens != null && usage.cachedTokens != null
+    ? Math.max(0, usage.inputTokens - usage.cachedTokens) : usage.inputTokens;
+  if (input != null) parts.push(v(2, input));
+  if (usage.outputTokens != null) parts.push(v(3, usage.outputTokens));
+  if (usage.cacheWriteTokens != null) parts.push(v(4, usage.cacheWriteTokens));
+  if (usage.cachedTokens != null) parts.push(v(5, usage.cachedTokens));
+  if (modelUid) parts.push(s(9, modelUid));
+  return parts.length ? Buffer.concat(parts) : null;
+}
+// 末块同时携带 delta_tokens(4) 与 usage(7)：二者是 agent 记录 assistant
+// num_tokens 与 prompt 累计量的来源；缺了它们自动压缩永远不会触发。
+function stopChunk(id, reason = 2, modelUid = '', usage = null) {
+  const stats = usage ? usageStats(usage, modelUid) : null;
+  return Buffer.concat([
+    ...prefix(id), v(5, reason),
+    ...(usage?.outputTokens != null ? [v(4, usage.outputTokens)] : []),
+    ...(stats ? [m(7, stats)] : []),
+    ...(modelUid ? [s(20, modelUid), s(23, modelUid)] : [])
+  ]);
+}
 
-module.exports = { parseChat, textChunk, thinkingChunk, toolChunk, stopChunk };
+module.exports = { parseChat, textChunk, thinkingChunk, toolChunk, stopChunk, usageStats };

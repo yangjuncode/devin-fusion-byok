@@ -12,7 +12,7 @@ function tracker() {
   return { value, at: n => { clock = n; } };
 }
 test('usage separates subset counters, zero and missing; never accumulates repeated usage', () => {
-  assert.deepEqual(usageOf({ usage: { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 80 } } }, true), { inputTokens: 100, outputTokens: 0, cachedTokens: 80, reasoningTokens: null });
+  assert.deepEqual(usageOf({ usage: { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 80 } } }, true), { inputTokens: 100, outputTokens: 0, cachedTokens: 80, cacheWriteTokens: null, reasoningTokens: null });
   assert.equal(usageOf({}, true), null);
   const t = tracker();
   t.at(100); t.value.event({ data: { choices: [{ delta: { reasoning_content: 'think' } }] } }, true);
