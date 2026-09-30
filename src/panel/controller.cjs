@@ -12,7 +12,9 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
     try {
       let result;
       try { result = await readMonitor(); } catch { result = { status: 'unavailable', snapshot: null }; }
-      if (panel === target) await target.webview.postMessage({ type: 'monitor-state', result });
+      // postMessage 对半死/已断开的 webview 可能永不返回；投递后不等待结果，
+      // 避免 monitorPending 卡在 true 让 5 秒轮询永久停摆（面板只剩旧数据定格）。
+      if (panel === target) void Promise.resolve(target.webview.postMessage({ type: 'monitor-state', result })).catch(() => {});
     } finally { monitorPending = false; }
   };
   let disposed = false;

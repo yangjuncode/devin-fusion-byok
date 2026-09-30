@@ -17,7 +17,7 @@ test('monitor browser script compiles, uses text nodes, and preserves zero versu
   const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   byId('monitor-session').value = 'all';
   let receive;
-  vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} } });
+  vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} }, setInterval: () => 0 });
   const record = { id: 'id', startedAt: 'now', model: '<img onerror=alert(1)>', status: 'success', inputTokens: 0, outputTokens: null, usageComplete: false, attribution: 'unassigned' };
   const timed = { id: 'id2', startedAt: '2026-09-24T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
   receive({ data: { type: 'monitor-state', result: { snapshot: { summary: { requests: 2, success: 2, error: 0, cancelled: 0 }, records: [record, timed], sessions: [], sessionStatus: 'ready' } } } });
@@ -54,7 +54,7 @@ test('monitor time range filters records and collapsible sections default collap
   byId('monitor-session').value = 'all';
   byId('monitor-range').value = '1h';
   let receive;
-  vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} } });
+  vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} }, setInterval: () => 0 });
   const fresh = { id: 'fresh', startedAt: new Date().toISOString(), model: 'm', status: 'success', attribution: 'unassigned' };
   const stale = { id: 'stale', startedAt: '2020-01-01T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
   const unparseable = { id: 'odd', startedAt: 'now', model: 'm', status: 'success', attribution: 'unassigned' };
@@ -71,6 +71,34 @@ test('monitor time range filters records and collapsible sections default collap
   const monitorTag = html.match(/<details id="usage-monitor"[^>]*>/)?.[0] || '';
   assert.ok(monitorTag.includes('open'), '用量与性能卡片默认展开');
   assert.match(html, /id="monitor-range"[^>]*aria-label="统计时间范围"/);
+});
+test('monitor shows a disconnect notice when monitor-state messages stop arriving', () => {
+  class Element {
+    constructor() { this.children = []; this.value = ''; this.textContent = ''; this.listeners = {}; this.style = {}; }
+    append(child) { this.children.push(child); }
+    replaceChildren() { this.children = []; }
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+    get options() { return this.children; }
+  }
+  const elements = new Map();
+  const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
+  byId('monitor-session').value = 'all';
+  let receive, tick, now = 1000000;
+  class FakeDate extends Date { static now() { return now; } }
+  vm.runInNewContext(monitorScript(), {
+    document: { getElementById: byId, createElement: () => new Element() },
+    window: { addEventListener: (_, fn) => { receive = fn; } },
+    vscode: { postMessage() {} }, setInterval: fn => { tick = fn; return 0; }, Date: FakeDate });
+  const status = byId('monitor-status');
+  tick();
+  assert.notEqual(status.textContent, '连接已断开，请关闭面板后重新打开。', '尚未收到任何消息时不误报断线');
+  receive({ data: { type: 'monitor-state', result: { snapshot: null, status: 'unavailable' } } });
+  now += 21000; tick();
+  assert.equal(status.textContent, '连接已断开，请关闭面板后重新打开。', '消息停止超过阈值后提示断线');
+  now += 5000;
+  receive({ data: { type: 'monitor-state', result: { snapshot: null, status: 'unavailable' } } });
+  tick();
+  assert.equal(status.textContent, '监控暂时不可用，请稍后刷新。', '恢复收到消息后回到正常状态文案');
 });
 test('panel refresh is isolated, concurrent reads are coalesced and disposal suppresses posts', async () => {
   const posts = []; let onMessage, onClose, finish, reads = 0;

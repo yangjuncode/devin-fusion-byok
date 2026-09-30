@@ -7,6 +7,7 @@ function monitorScript() {
   return `
   (() => {
     let snapshot = null;
+    let lastMessageAt = Date.now();
     const selector = document.getElementById('monitor-session');
     const range = document.getElementById('monitor-range');
     const status = document.getElementById('monitor-status');
@@ -67,6 +68,7 @@ function monitorScript() {
     document.getElementById('monitor-refresh').addEventListener('click', () => vscode.postMessage({ id: 'monitor-refresh', type: 'monitor.refresh' }));
     window.addEventListener('message', event => {
       if (event.data?.type !== 'monitor-state') return;
+      lastMessageAt = Date.now();
       const result = event.data.result;
       snapshot = result?.snapshot || null;
       status.textContent = !snapshot ? (result?.status === 'unsupported' ? '当前服务尚未启用监控；新版服务会在请求空闲后接替。' : '监控暂时不可用，请稍后刷新。') : snapshot.storageError ? '监控存储异常，统计可能不完整。' : snapshot.sessionStatus !== 'ready' ? '会话库暂时无法读取；请求用量仍保留，归属待确认。' : '每 5 秒刷新。会话以 ID 显示；未采集聊天正文。';
@@ -76,6 +78,11 @@ function monitorScript() {
       if ([...selector.options].some(o => o.value === previous)) selector.value = previous;
       render();
     });
+    // 扩展宿主崩溃或重启后，面板 DOM 仍残留但不会再收到 monitor-state：
+    // 超过 20 秒无消息时把状态行换成断线提示，避免列表静默定格旧数据。
+    setInterval(() => {
+      if (Date.now() - lastMessageAt > 20000) status.textContent = '连接已断开，请关闭面板后重新打开。';
+    }, 5000);
   })();`;
 }
 module.exports = { monitorMarkup, monitorScript };
