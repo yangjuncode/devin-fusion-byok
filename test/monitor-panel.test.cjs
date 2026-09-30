@@ -41,6 +41,37 @@ test('usage monitor renders as the last section of the panel', () => {
   assert.ok(monitor > html.indexOf('保存后在新建会话中使用。'), 'usage monitor follows the closing footnote');
   assert.ok(monitor < html.indexOf('</main>'), 'usage monitor stays inside the panel body');
 });
+test('monitor time range filters records and collapsible sections default collapsed', () => {
+  class Element {
+    constructor() { this.children = []; this.value = ''; this.textContent = ''; this.listeners = {}; this.style = {}; }
+    append(child) { this.children.push(child); }
+    replaceChildren() { this.children = []; }
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+    get options() { return this.children; }
+  }
+  const elements = new Map();
+  const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
+  byId('monitor-session').value = 'all';
+  byId('monitor-range').value = '1h';
+  let receive;
+  vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} } });
+  const fresh = { id: 'fresh', startedAt: new Date().toISOString(), model: 'm', status: 'success', attribution: 'unassigned' };
+  const stale = { id: 'stale', startedAt: '2020-01-01T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
+  const unparseable = { id: 'odd', startedAt: 'now', model: 'm', status: 'success', attribution: 'unassigned' };
+  receive({ data: { type: 'monitor-state', result: { snapshot: { records: [fresh, stale, unparseable], sessions: [], sessionStatus: 'ready' } } } });
+  assert.equal(byId('monitor-requests').children.length, 2, '时间范围外的记录被过滤，时间无法解析的记录仍显示');
+  byId('monitor-range').value = 'all';
+  byId('monitor-range').listeners.change();
+  assert.equal(byId('monitor-requests').children.length, 3, '切回全部后显示所有记录');
+  const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
+  for (const id of ['models-card', 'fusion-card', 'native-card', 'monitor-meta']) {
+    const tag = html.match(new RegExp('<details id="' + id + '"[^>]*>'))?.[0] || '';
+    assert.ok(tag && !tag.includes('open'), id + ' 默认折叠');
+  }
+  const monitorTag = html.match(/<details id="usage-monitor"[^>]*>/)?.[0] || '';
+  assert.ok(monitorTag.includes('open'), '用量与性能卡片默认展开');
+  assert.match(html, /id="monitor-range"[^>]*aria-label="统计时间范围"/);
+});
 test('panel refresh is isolated, concurrent reads are coalesced and disposal suppresses posts', async () => {
   const posts = []; let onMessage, onClose, finish, reads = 0;
   const disposable = { dispose() {} };

@@ -100,6 +100,13 @@ function renderPanel({ nonce, cspSource }) {
     .monitor-table { border-collapse: collapse; white-space: nowrap; width: 100%; }
     .monitor-table td, .monitor-table th { padding: 7px 10px; border-bottom: 1px solid var(--vscode-panel-border, #444); text-align: left; }
     .monitor-metric { display: inline-block; margin: 8px 22px 8px 0; }
+    details.card > summary.card-head { cursor: pointer; list-style: none; }
+    details.card > summary.card-head::-webkit-details-marker { display: none; }
+    details.card:not([open]) > summary.card-head { border-bottom-color: transparent; }
+    .card-head .head-meta { display: inline-flex; align-items: center; gap: 8px; }
+    .chevron { color: var(--vscode-descriptionForeground, #999); font-size: 12px; transition: transform .12s ease; }
+    details[open] > summary .chevron { transform: rotate(90deg); }
+    .monitor-fold > summary { cursor: pointer; padding: 4px 0; color: var(--vscode-descriptionForeground, #999); }
     dialog { width: min(540px, calc(100vw - 28px)); max-height: calc(100vh - 40px); overflow: auto; margin: auto; padding: 20px; border: 1px solid var(--vscode-panel-border, #454545); border-radius: 7px; color: var(--vscode-foreground, #ddd); background: var(--vscode-editor-background, #1e1e1e); box-shadow: 0 8px 28px var(--vscode-widget-shadow, #0006); }
     dialog::backdrop { background: #0007; }
     dialog h2 { font-size: 17px; margin-bottom: 16px; }
@@ -144,19 +151,19 @@ function renderPanel({ nonce, cspSource }) {
         <div class="card-head"><h2 id="provider-heading">供应商</h2><button id="add-provider" class="quiet" type="button" disabled>添加</button></div>
         <nav id="providers" class="provider-list" aria-label="供应商列表"></nav>
       </section>
-      <section class="card" aria-labelledby="model-heading">
-        <div class="card-head"><h2 id="model-heading">导入的模型</h2><span id="model-count" class="hint"></span></div>
+      <details id="models-card" class="card" aria-labelledby="model-heading">
+        <summary class="card-head"><h2 id="model-heading">导入的模型</h2><span class="head-meta"><span id="model-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
         <div id="models" class="card-content"><div class="empty">读取后即可管理模型。</div></div>
-      </section>
+      </details>
     </div>
-    <section class="card fusion-card" aria-labelledby="fusion-heading">
-      <div class="card-head"><h2 id="fusion-heading">Fusion 组合</h2><span id="fusion-count" class="hint"></span></div>
+    <details id="fusion-card" class="card fusion-card" aria-labelledby="fusion-heading">
+      <summary class="card-head"><h2 id="fusion-heading">Fusion 组合</h2><span class="head-meta"><span id="fusion-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
       <div id="fusion" class="card-content"></div>
-    </section>
-    <section class="card fusion-card" aria-labelledby="native-heading">
-      <div class="card-head"><h2 id="native-heading">官方模型</h2><span id="native-count" class="hint"></span></div>
+    </details>
+    <details id="native-card" class="card fusion-card" aria-labelledby="native-heading">
+      <summary class="card-head"><h2 id="native-heading">官方模型</h2><span class="head-meta"><span id="native-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
       <div id="native-models" class="card-content"></div>
-    </section>
+    </details>
     <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
     ${monitorMarkup()}
   </main>
@@ -208,6 +215,8 @@ function panelClient(modelSupportsImages, vscode) {
     node.dataset.tone = tone || '';
     node.hidden = !message;
   }
+
+  const persist = patch => { try { vscode.setState({ ...(vscode.getState() || {}), ...patch }); } catch { /* webview 状态不可用时忽略记忆。 */ } };
 
   function setBusy(value) {
     busy = value;
@@ -264,7 +273,7 @@ function panelClient(modelSupportsImages, vscode) {
     const previousProvider = previousState?.providers?.find(provider => provider.id === providerId);
     const previousDraft = modelDraft;
     if (!state.providers.some(provider => provider.id === providerId)) providerId = state.providers[0]?.id || '';
-    vscode.setState({ providerId });
+    persist({ providerId });
     resetModelDraft();
     if (previousProvider?.id === providerId) {
       const previousModels = new Map(previousProvider.models.map(model => [model.id, model]));
@@ -309,7 +318,7 @@ function panelClient(modelSupportsImages, vscode) {
           const choose = () => {
             providerId = provider.id;
             modelSearch = '';
-            vscode.setState({ providerId });
+            persist({ providerId });
             resetModelDraft();
             renderProviders();
             renderModels();
