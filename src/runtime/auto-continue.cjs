@@ -23,6 +23,16 @@ function matchesTerminalBlocker(text) {
   return TERMINAL_BLOCKER_RE.test(trimmed);
 }
 
+// 自动续接最大次数：默认 30，可配置 0-100，0 表示不自动续接；
+// 服务商错误续接与待办续接共用同一计数。
+const DEFAULT_MAX_ATTEMPTS = 30;
+const MAX_ATTEMPTS_LIMIT = 100;
+
+function normalizedMaxAttempts(options) {
+  const value = options?.maxAttempts;
+  return Number.isSafeInteger(value) && value >= 0 ? Math.min(value, MAX_ATTEMPTS_LIMIT) : DEFAULT_MAX_ATTEMPTS;
+}
+
 const RESET_METHODS = new Set([
   'session/cancel',
   'session/load',
@@ -149,7 +159,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       turn.scheduledReason = reason;
       const attempts = turn.attempts || 0;
       const safePow = Math.min(attempts, 10);
-      const delay = Math.min(2000 * Math.pow(2, safePow), 30000);
+      const delay = Math.min(1000 * Math.pow(2, safePow), 60000);
       const generation = turn.generation;
       report('auto-continue-scheduled', { attempts, delay, reason });
 
@@ -275,6 +285,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           if (turn.generation !== capturedGen) return;
           turn.consumed = true;
           const options = getOptions() || {};
+          const underLimit = turn.attempts < normalizedMaxAttempts(options);
 
           const shouldRetryError = !turn.retryDisallowed && isEnabled() && options.onProviderError !== false && matchesProviderError(turn.tail);
           const hasPendingPlan = checkHasPendingPlan(turn);
@@ -282,10 +293,13 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && options.untilPlanComplete === true &&
             hasPendingPlan && (res.stopReason === 'end_turn' || res.stopReason === 'max_tokens');
 
-          if (shouldRetryError) {
+          if ((shouldRetryError || shouldRetryPlan) && !underLimit) {
+            report('auto-continue-stopped', { reason: 'max-attempts', attempts: turn.attempts });
+          }
+          if (shouldRetryError && underLimit) {
             turn.lastResult = { value: res, isReject: false };
             scheduleAuto(sessionId, turn, 'error');
-          } else if (shouldRetryPlan && hasPlanProgress(turn)) {
+          } else if (shouldRetryPlan && underLimit && hasPlanProgress(turn)) {
             turn.lastResult = { value: res, isReject: false };
             scheduleAuto(sessionId, turn, 'plan');
           } else {
@@ -320,10 +334,14 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           const isExactMsg = (msg === TARGET_ERROR || msg === TARGET_ERROR + '.');
           const options = getOptions() || {};
 
-          if (isEnabled() && options.onProviderError !== false && isExactMsg) {
+          if (isEnabled() && options.onProviderError !== false && isExactMsg &&
+              turn.attempts < normalizedMaxAttempts(options)) {
             turn.lastResult = { value: err, isReject: true };
             scheduleAuto(sessionId, turn, 'error');
           } else {
+            if (isEnabled() && options.onProviderError !== false && isExactMsg) {
+              report('auto-continue-stopped', { reason: 'max-attempts', attempts: turn.attempts });
+            }
             turn.retryDisallowed = true;
             if (turn.deferred && !turn.deferred.settled) {
               turn.deferred.settled = true;
@@ -457,6 +475,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           if (!turn.consumed) {
             turn.consumed = true;
             const options = getOptions() || {};
+            const underLimit = turn.attempts < normalizedMaxAttempts(options);
             const isError = matchesProviderError(turn.tail);
             const isBlocked = matchesTerminalBlocker(turn.tail);
             const shouldRetryError = !turn.retryDisallowed && isEnabled() && options.onProviderError !== false && isError;
@@ -464,9 +483,12 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
             const allowedPlanReason = update.stopReason === 'end_turn' || update.stopReason === 'max_tokens';
             const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && options.untilPlanComplete === true && hasPendingPlan && allowedPlanReason;
 
-            if (shouldRetryError) {
+            if ((shouldRetryError || shouldRetryPlan) && !underLimit) {
+              report('auto-continue-stopped', { reason: 'max-attempts', attempts: turn.attempts });
+            }
+            if (shouldRetryError && underLimit) {
               scheduleAuto(sessionId, turn, 'error');
-            } else if (shouldRetryPlan && hasPlanProgress(turn)) {
+            } else if (shouldRetryPlan && underLimit && hasPlanProgress(turn)) {
               scheduleAuto(sessionId, turn, 'plan');
             } else {
               entry.sessions.delete(sessionId);

@@ -149,10 +149,10 @@ test('auto continue handles v1 fail -> continue -> success with backoff and synt
   assert.equal(scheduler.pendingCount(), 1);
   assert.equal(promptCount, 1);
 
-  scheduler.advance(1000);
+  scheduler.advance(999);
   assert.equal(promptCount, 1);
 
-  scheduler.advance(1000);
+  scheduler.advance(1);
   assert.equal(promptCount, 2);
 
   const continueCall = serverCalls[1];
@@ -288,9 +288,9 @@ test('auto continue handles v2 idle completion, duplicate idle suppression, and 
   });
 
   assert.equal(scheduler.pendingCount(), 1);
-  scheduler.advance(2000);
+  scheduler.advance(1999);
   assert.equal(promptCalls, 2);
-  scheduler.advance(2000);
+  scheduler.advance(1);
   assert.equal(promptCalls, 3);
 });
 
@@ -818,7 +818,7 @@ test('auto inflight cancel, reset, dispose properly settles awaited original pro
   }
 });
 
-test('double failures then success in v1 with exact backoff 2s then 4s and zero leftover timers', { timeout: 1000 }, async t => {
+test('double failures then success in v1 with exact backoff 1s then 2s and zero leftover timers', { timeout: 1000 }, async t => {
   const f = fixture();
   const scheduler = fakeScheduler();
   const handle = f.install({ isEnabled: () => true, scheduler });
@@ -856,7 +856,7 @@ test('double failures then success in v1 with exact backoff 2s then 4s and zero 
 
   await new Promise(r => setImmediate(r));
   assert.equal(scheduler.pendingCount(), 1);
-  scheduler.advance(1999);
+  scheduler.advance(999);
   assert.equal(promptCount, 1);
   scheduler.advance(1);
   assert.equal(promptCount, 2);
@@ -871,7 +871,7 @@ test('double failures then success in v1 with exact backoff 2s then 4s and zero 
 
   await new Promise(r => setImmediate(r));
   assert.equal(scheduler.pendingCount(), 1);
-  scheduler.advance(3999);
+  scheduler.advance(1999);
   assert.equal(promptCount, 2);
   scheduler.advance(1);
   assert.equal(promptCount, 3);
@@ -1768,3 +1768,377 @@ for (const protocolVersion of [1, 2]) {
     assert.equal(f.logs.filter(log => log.event === 'auto-continue-scheduled').every(log => log.data.reason === 'error'), true);
   });
 }
+
+test('auto continue backoff follows 1,2,4,8,16,32 then caps at 60s', { timeout: 1000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({ isEnabled: () => true, scheduler });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    protocolVersion: 1,
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ stopReason: 'end_turn' });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  const fail = () => connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-backoff',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Provider response could not be completed' } }
+    }
+  });
+
+  const p = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-backoff', prompt: [{ type: 'text', text: 'run' }] }
+  });
+
+  fail();
+  const delays = [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000];
+  for (const [index, delay] of delays.entries()) {
+    await new Promise(r => setImmediate(r));
+    assert.equal(scheduler.pendingCount(), 1);
+    assert.equal(promptCount, index + 1);
+    scheduler.advance(delay - 1);
+    assert.equal(promptCount, index + 1);
+    scheduler.advance(1);
+    assert.equal(promptCount, index + 2);
+    if (index < delays.length - 1) fail();
+  }
+
+  const res = await p;
+  assert.equal(res.stopReason, 'end_turn');
+  assert.equal(scheduler.pendingCount(), 0);
+});
+
+test('provider error auto continue stops at configured max attempts and settles turn', { timeout: 1000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: true, untilPlanComplete: false, maxAttempts: 2 }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    protocolVersion: 1,
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ stopReason: 'end_turn' });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  const fail = () => connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-capped',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Provider response could not be completed' } }
+    }
+  });
+
+  const p = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-capped', prompt: [{ type: 'text', text: 'hi' }] }
+  });
+
+  fail();
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 1);
+  scheduler.advance(1000);
+  assert.equal(promptCount, 2);
+
+  fail();
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 1);
+  scheduler.advance(2000);
+  assert.equal(promptCount, 3);
+
+  fail();
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 0);
+
+  const res = await p;
+  assert.equal(res.stopReason, 'end_turn');
+  assert.equal(handle.status().autoContinueCount, 2);
+  const stopped = f.logs.filter(l => l.event === 'auto-continue-stopped');
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].data.reason, 'max-attempts');
+  assert.equal(stopped[0].data.attempts, 2);
+});
+
+test('auto continue defaults to 30 max attempts when option unset', { timeout: 2000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: true, untilPlanComplete: false }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    protocolVersion: 1,
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ stopReason: 'end_turn' });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  const fail = () => connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-default-cap',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Provider response could not be completed' } }
+    }
+  });
+
+  const p = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-default-cap', prompt: [{ type: 'text', text: 'hi' }] }
+  });
+
+  fail();
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setImmediate(r));
+    assert.equal(scheduler.pendingCount(), 1, `cycle ${i}`);
+    scheduler.advance(60000);
+    assert.equal(promptCount, i + 2);
+    fail();
+  }
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 0);
+
+  const res = await p;
+  assert.equal(res.stopReason, 'end_turn');
+  assert.equal(handle.status().autoContinueCount, 30);
+  assert.equal(f.logs.filter(l => l.event === 'auto-continue-stopped' && l.data?.reason === 'max-attempts').length, 1);
+});
+
+test('max attempts 0 disables both error and plan continuation', { timeout: 1000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: true, untilPlanComplete: true, maxAttempts: 0 }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    protocolVersion: 1,
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ stopReason: 'end_turn' });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  const pError = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-zero-error', prompt: [{ type: 'text', text: 'hi' }] }
+  });
+  connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-zero-error',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Provider response could not be completed' } }
+    }
+  });
+
+  const pPlan = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-zero-plan', prompt: [{ type: 'text', text: 'hi' }] }
+  });
+  connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-zero-plan',
+      update: { sessionUpdate: 'plan', entries: [{ content: 'Task', status: 'pending' }] }
+    }
+  });
+
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 0);
+  assert.equal((await pError).stopReason, 'end_turn');
+  assert.equal((await pPlan).stopReason, 'end_turn');
+  assert.equal(promptCount, 2);
+  assert.equal(handle.status().autoContinueCount, 0);
+  assert.equal(f.logs.filter(l => l.event === 'auto-continue-stopped' && l.data?.reason === 'max-attempts').length, 2);
+});
+
+test('shared attempt limit also caps plan continuation', { timeout: 1000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: false, untilPlanComplete: true, maxAttempts: 1 }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    protocolVersion: 1,
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ stopReason: 'end_turn' });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  const p = connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-plan-cap', prompt: [{ type: 'text', text: 'run' }] }
+  });
+  connector.forwardClientRequest({
+    method: 'session/update',
+    params: {
+      sessionId: 's-plan-cap',
+      update: { sessionUpdate: 'plan', entries: [{ content: 'Task', status: 'pending' }] }
+    }
+  });
+
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 1);
+  scheduler.advance(1000);
+  assert.equal(promptCount, 2);
+
+  await new Promise(r => setImmediate(r));
+  assert.equal(scheduler.pendingCount(), 0);
+  const res = await p;
+  assert.equal(res.stopReason, 'end_turn');
+  assert.equal(handle.status().autoContinueCount, 1);
+  assert.equal(f.logs.filter(l => l.event === 'auto-continue-stopped' && l.data?.reason === 'max-attempts').length, 1);
+});
+
+test('v2 idle path respects max attempts', { timeout: 1000 }, async t => {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: true, untilPlanComplete: false, maxAttempts: 1 }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+
+  let promptCount = 0;
+  const connector = {
+    agentId: 'devin-cli',
+    bundled: true,
+    location: { kind: 'local' },
+    get protocolVersion() { return 2; },
+    sendRequest(req) {
+      if (req.method === 'session/prompt') {
+        promptCount++;
+        return Promise.resolve({ acknowledgment: true });
+      }
+      return Promise.resolve({});
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+
+  await connector.sendRequest({
+    method: 'session/prompt',
+    params: { sessionId: 's-v2-cap', prompt: [{ type: 'text', text: 'hi' }] }
+  });
+
+  const fail = messageId => {
+    connector.forwardClientRequest({
+      method: 'session/update',
+      params: {
+        sessionId: 's-v2-cap',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'text', text: 'Provider response could not be completed' }
+        }
+      }
+    });
+    connector.forwardClientRequest({
+      method: 'session/update',
+      params: { sessionId: 's-v2-cap', update: { sessionUpdate: 'state_update', state: 'idle' } }
+    });
+  };
+
+  fail('m1');
+  assert.equal(scheduler.pendingCount(), 1);
+  scheduler.advance(1000);
+  assert.equal(promptCount, 2);
+
+  fail('m2');
+  assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(handle.status().activeSessions, 0);
+  assert.equal(handle.status().autoContinueCount, 1);
+  assert.equal(f.logs.filter(l => l.event === 'auto-continue-stopped' && l.data?.reason === 'max-attempts').length, 1);
+});
+
+test('manager setAutoContinueMaxAttempts integer validation and public state', async () => {
+  let savedConfig = { enabled: true, providers: [] };
+  const manager = createManager({
+    read: () => savedConfig,
+    write: c => { savedConfig = c; }
+  });
+
+  const s0 = manager.state();
+  assert.equal(s0.autoContinueMaxAttempts, 30);
+
+  await assert.rejects(manager.dispatch('setAutoContinueMaxAttempts', { count: 'x' }), /自动续接次数/);
+  await assert.rejects(manager.dispatch('setAutoContinueMaxAttempts', { count: -1 }), /自动续接次数/);
+  await assert.rejects(manager.dispatch('setAutoContinueMaxAttempts', { count: 101 }), /自动续接次数/);
+  await assert.rejects(manager.dispatch('setAutoContinueMaxAttempts', { count: 1.5 }), /自动续接次数/);
+
+  const s1 = await manager.dispatch('setAutoContinueMaxAttempts', { count: 45 });
+  assert.equal(s1.autoContinueMaxAttempts, 45);
+  assert.equal(savedConfig.autoContinueMaxAttempts, 45);
+
+  const s2 = await manager.dispatch('setAutoContinueMaxAttempts', { count: 0 });
+  assert.equal(s2.autoContinueMaxAttempts, 0);
+  assert.equal(savedConfig.autoContinueMaxAttempts, 0);
+});
