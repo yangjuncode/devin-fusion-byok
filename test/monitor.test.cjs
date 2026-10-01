@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { createMonitor, createTracker, usageOf, associate, summarize } = require('../src/runtime/monitor.cjs');
+const wire = require('../src/protocol/wire.cjs');
+const { createMonitor, createTracker, createNativeTracker, usageOf, associate, summarize } = require('../src/runtime/monitor.cjs');
 function tracker() {
   let clock = 0;
   const value = createTracker({ id: 'response-1', request: { messages: [{ messageId: 'user-1', content: 'PRIVATE' }] }, route: { model: 'test' }, provider: { id: 'p', apiKey: 'SECRET' }, now: () => clock });
@@ -118,8 +119,6 @@ test('persists private-safe records, resolves real SQLite IDs read-only and surv
 });
 
 test('native tracker parses forwarded chat frames and keeps the response message id', () => {
-  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
-  const wire = require('../src/protocol/wire.cjs');
   const { textChunk, toolChunk, stopChunk } = require('../src/protocol/chat.cjs');
   let record = null;
   const tracker = createNativeTracker({
@@ -149,9 +148,138 @@ test('native tracker parses forwarded chat frames and keeps the response message
   assert.ok(result.durationMs >= 0 && result.firstResponseMs !== null && result.firstTextMs !== null);
 });
 
+test('native tracker parses official token usage (input, output, cache read/write) from Connect-RPC stream', async t => {
+  const { textChunk, stopChunk } = require('../src/protocol/chat.cjs');
+  let clock = 1000;
+  const now = () => clock;
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+    now,
+    t0: 1000,
+  });
+
+  clock = 1100;
+  tracker.data(wire.frame(textChunk('msg-official-1', 'Hello user')));
+
+  clock = 1300;
+  // stopChunk encodes Tag 7 ModelUsageStats with:
+  // freshInput = inputTokens - cachedTokens = 1500 - 300 = 1200
+  // completion = outputTokens = 150
+  // cacheWrite = cacheWriteTokens = 80
+  // cacheRead = cachedTokens = 300
+  const stop = stopChunk('msg-official-1', 2, 'claude-3-7-sonnet', {
+    inputTokens: 1500,
+    outputTokens: 150,
+    cachedTokens: 300,
+    cacheWriteTokens: 80,
+  });
+  tracker.data(wire.frame(stop));
+
+  clock = 1500;
+  const result = tracker.finish('end', 200);
+  assert.equal(result.id, 'msg-official-1');
+  assert.equal(result.model, 'claude-3-7-sonnet');
+  assert.equal(result.providerId, 'official');
+  assert.equal(result.status, 'success');
+  assert.equal(result.inputTokens, 1500);
+  assert.equal(result.outputTokens, 150);
+  assert.equal(result.cachedTokens, 300);
+  assert.equal(result.cacheWriteTokens, 80);
+  assert.equal(result.usageComplete, true);
+  assert.equal(result.reasoningTokens, null);
+  assert.equal(result.visibleTokens, 150);
+  assert.equal(result.firstResponseMs, 100);
+  assert.equal(result.firstTextMs, 100);
+  assert.equal(result.durationMs, 500);
+  assert.equal(result.throughputTps, 300); // 150 tokens / 0.5s = 300 TPS
+
+  // Normalization through createMonitor
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'official-monitor-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const monitor = createMonitor({ root, databasePath: path.join(root, 'none.db') });
+  monitor.record(result);
+  const snap = await monitor.snapshot();
+  assert.equal(snap.records.length, 1);
+  const rec = snap.records[0];
+  assert.equal(rec.inputTokens, 1500);
+  assert.equal(rec.outputTokens, 150);
+  assert.equal(rec.cachedTokens, 300);
+  assert.equal(rec.usageState, 'complete');
+  assert.equal(rec.usageComplete, true);
+  // gatewayTps = 150 * 1000 / (500 - 100) = 375
+  assert.equal(rec.gatewayTps, 375);
+  assert.equal(snap.summary.inputTokens.value, 1500);
+  assert.equal(snap.summary.outputTokens.value, 150);
+  assert.equal(snap.summary.cachedTokens.value, 300);
+});
+
+test('native tracker parses official usage with fresh prompt only (no cached tokens) and fallback output tokens', () => {
+  // Construct raw Protobuf GetChatMessageResponse chunk:
+  // Tag 1 (msg id) = "msg-direct"
+  // Tag 4 (varint delta_tokens) = 42
+  // Tag 7 (metadata sub-message) with tag 2 (input=250), tag 3 (output=42), tag 9 (model="gpt-5-max")
+  const stats = Buffer.concat([
+    wire.v(2, 250),
+    wire.v(3, 42),
+    wire.s(9, 'gpt-5-max'),
+  ]);
+  const chunk = Buffer.concat([
+    wire.s(1, 'msg-direct'),
+    wire.v(4, 42),
+    wire.m(7, stats),
+  ]);
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+  });
+  tracker.data(wire.frame(chunk));
+  const result = tracker.finish('end', 200);
+  assert.equal(result.id, 'msg-direct');
+  assert.equal(result.model, 'gpt-5-max');
+  assert.equal(result.inputTokens, 250);
+  assert.equal(result.outputTokens, 42);
+  assert.equal(result.cachedTokens, null);
+  assert.equal(result.usageComplete, true);
+});
+
+test('native tracker falls back to top-level delta_tokens when field 7 is absent', () => {
+  // 只有顶层 Tag 4 (delta_tokens)、没有 Tag 7 元数据的帧：输出量应降级取顶层值，
+  // 输入缺失则 usageComplete 为 false（用量记为 partial/missing，而非编造输入）。
+  const chunk = Buffer.concat([wire.s(1, 'msg-delta-only'), wire.v(4, 33)]);
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+  });
+  tracker.data(wire.frame(chunk));
+  const result = tracker.finish('end', 200);
+  assert.equal(result.id, 'msg-delta-only');
+  assert.equal(result.outputTokens, 33);
+  assert.equal(result.inputTokens, null);
+  assert.equal(result.cachedTokens, null);
+  assert.equal(result.usageComplete, false);
+});
+
+test('native tracker merges ModelUsageStats subfields across frames instead of replacing', () => {
+  // 中间帧的 #7 只带 input，末帧的 #7 只带 output 与缓存读：逐字段合并应
+  // 保留 input，而不是被后一个不含 input 的 #7 整包覆盖。
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+  });
+  tracker.data(wire.frame(Buffer.concat([
+    wire.s(1, 'msg-merged'),
+    wire.m(7, wire.v(2, 500)),
+  ])));
+  tracker.data(wire.frame(Buffer.concat([
+    wire.s(1, 'msg-merged'),
+    wire.m(7, Buffer.concat([wire.v(3, 60), wire.v(5, 20)])),
+  ])));
+  const result = tracker.finish('end', 200);
+  assert.equal(result.id, 'msg-merged');
+  assert.equal(result.inputTokens, 520);   // fresh 500 + cache_read 20
+  assert.equal(result.outputTokens, 60);
+  assert.equal(result.cachedTokens, 20);
+  assert.equal(result.usageComplete, true);
+});
+
 test('native tracker falls back to stream uid and marks aborts cancelled', () => {
-  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
-  const wire = require('../src/protocol/wire.cjs');
   const { stopChunk } = require('../src/protocol/chat.cjs');
   const tracker = createNativeTracker({
     upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
