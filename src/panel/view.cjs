@@ -499,7 +499,7 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '上游错误自动重试' }),
-          element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出任何内容时生效，默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
+          element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出正文或工具调用时生效（仅推理输出不阻止重试），默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'checkbox',

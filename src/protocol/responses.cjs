@@ -149,7 +149,7 @@ function processor(id, uid, chat, emit) {
     }
     const delta = complete ? value.slice(previous.length) : value;
     texts.set(key, complete ? value : previous + value);
-    if (delta) await emit(thinking ? thinkingChunk(id, delta) : textChunk(id, delta));
+    if (delta) await emit(thinking ? thinkingChunk(id, delta) : textChunk(id, delta), thinking);
   };
   const item = async (value, index, done) => {
     if (value.type === 'function_call') {
@@ -323,8 +323,12 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     signal?.addEventListener('abort', finish, { once: true });
     res.once('close', finish);
   });
-  // 已向客户端输出内容后无法透明重发（会产生重复输出），只能走原错误路径。
-  const canRetry = () => !res.headersSent &&
+  // 已向客户端输出正文或工具调用后无法透明重发（会产生重复输出），只能走原错误
+  // 路径。仅输出过 thinking 仍可重发：重试生成的新推理追加在同一消息上，不会
+  // 重复执行或重复展示正文。
+  let emittedVisible = false;
+  const emit = async (chunk, thinking = false) => { if (!thinking) emittedVisible = true; await write(chunk); };
+  const canRetry = () => !emittedVisible &&
     (classifiedCode === 'upstream_http' ? RETRYABLE_HTTP_STATUS.has(status) : RETRYABLE_CODES.has(classifiedCode));
 
   const emitCancelled = () => {
@@ -418,7 +422,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
           }
         }
 
-        const stream = processor(id, route.uid || request.modelUid, chat, write);
+        const stream = processor(id, route.uid || request.modelUid, chat, emit);
         try {
           for await (const event of events(rawChunksWithTimeout(upstream.body))) {
             metrics.event(event, chat);
