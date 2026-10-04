@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
-function createPanelController({ vscode, context, manager, safeError, updater, restartApp, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
+function createPanelController({ vscode, context, manager, safeError, updater, restartApp, fastContext, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
   let panel;
   let monitorPending = false;
   const refreshMonitor = async () => {
@@ -26,6 +26,24 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
   };
   const publishUpdates = () => panel && updater ? panel.webview.postMessage({ type: 'update-state', state: updater.snapshot() }) : undefined;
   const publish = () => panel ? postState(panel, manager.state()) : undefined;
+  const FAST_CONTEXT_ERRORS = { fast_context_root_not_allowed: '只能选择已打开的项目或在此处选择的文件夹。',
+    fast_context_root_missing: '该文件夹不存在或无法访问，请重新选择。', fast_context_untrusted: '请先信任工作区，再复制 Fast Context 配置。' };
+  async function handleFastContext(target, message) {
+    const post = value => target.webview.postMessage(value);
+    if (!fastContext) { await post({ type: 'fast-context-result', ok: false, text: '当前环境不支持 Fast Context 配置。' }); return; }
+    let selected;
+    try {
+      if (message.type === 'fastContext.pick') selected = await fastContext.pick() || undefined;
+      else if (message.type === 'fastContext.copy') {
+        const kind = message.payload?.kind === 'config' ? 'config' : 'prompt';
+        await fastContext.copy(kind, message.payload?.root);
+        await post({ type: 'fast-context-result', ok: true, text: kind === 'prompt' ? '提示词已复制，粘贴给其他 Harness 里的 Agent 即可。' : '配置 JSON 已复制。' });
+      } else if (message.type !== 'fastContext.state') return;
+    } catch (error) {
+      await post({ type: 'fast-context-result', ok: false, text: FAST_CONTEXT_ERRORS[error?.message] || safeError(error).message });
+    }
+    await post({ type: 'fast-context-state', state: fastContext.state(), selected });
+  }
   function open() {
     if (disposed) return;
     if (panel) { panel.reveal(); void publish(); return; }
@@ -37,6 +55,7 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
     const messages = panel.webview.onDidReceiveMessage(async message => {
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;
       if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
+      if (message.type.startsWith('fastContext.')) { await handleFastContext(current, message); return; }
       try {
         if (message.type === 'app.restart') {
           if (typeof restartApp !== 'function') throw new PanelInputError('当前环境不支持重启 Devin。');

@@ -3,12 +3,13 @@ const { modelSupportsImages } = require('../model-capabilities.cjs');
 const { normalizeBaseUrlPath } = require('./base-url.cjs');
 const { monitorMarkup, monitorScript } = require('./monitor-view.cjs');
 const { updateMarkup, updateScript } = require('./update-view.cjs');
+const { fastContextMarkup, fastContextScript } = require('./fast-context-view.cjs');
 
 function escapeAttribute(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 }
 
-const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['goal', 'Goal', 'Beta'], ['settings', '设置']];
+const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['goal', 'Goal', 'Beta'], ['fastcontext', 'Fast Context'], ['settings', '设置']];
 
 function goalMarkup() {
   const code = text => `<code class="cmd">${text}</code>`;
@@ -196,6 +197,7 @@ function renderPanel({ nonce, cspSource }) {
     </section>
     <section id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden>${monitorMarkup()}</section>
     <section id="view-goal" role="tabpanel" aria-labelledby="tab-goal" hidden>${goalMarkup()}</section>
+    <section id="view-fastcontext" role="tabpanel" aria-labelledby="tab-fastcontext" hidden>${fastContextMarkup()}</section>
     <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div id="settings-general"></div>
       <details id="role-group" class="group"><summary>预设可选模型<span id="role-count" class="hint"></span></summary><div class="group-body"><p class="hint mb">新建预设时，下拉框只列出这里打开的模型。</p><div class="role-grid"><div id="role-lead"></div><div id="role-sidekick"></div></div></div></details>
@@ -205,7 +207,7 @@ function renderPanel({ nonce, cspSource }) {
   </main>
   <div id="status" class="toast" role="status" aria-live="polite" hidden></div>
   <dialog id="editor-dialog" aria-labelledby="dialog-title"></dialog>
-  <script nonce="${safeNonce}">const vscode = acquireVsCodeApi(); (${panelClient.toString()})(${modelSupportsImages.toString()}, vscode, ${normalizeBaseUrlPath.toString()}); ${monitorScript()} ${updateScript()}</script>
+  <script nonce="${safeNonce}">const vscode = acquireVsCodeApi(); (${panelClient.toString()})(${modelSupportsImages.toString()}, vscode, ${normalizeBaseUrlPath.toString()}); ${monitorScript()} ${updateScript()} ${fastContextScript()}</script>
 </body>
 </html>`;
 }
@@ -215,7 +217,7 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
   const byId = id => document.getElementById(id);
   const pending = new Map();
   const saved = vscode.getState() || {};
-  const TAB_IDS = ['presets', 'models', 'usage', 'goal', 'settings'];
+  const TAB_IDS = ['presets', 'models', 'usage', 'goal', 'fastcontext', 'settings'];
   let serial = 0;
   let state;
   let busy = false;
@@ -324,6 +326,7 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     for (const node of document.querySelectorAll('.tab')) node.setAttribute('aria-selected', String(node.dataset.tab === tab));
     for (const id of TAB_IDS) byId('view-' + id).hidden = id !== tab;
     if (tab === 'usage') vscode.postMessage({ id: 'monitor-refresh', type: 'monitor.refresh' });
+    if (tab === 'fastcontext') vscode.postMessage({ id: 'fc-refresh', type: 'fastContext.state' });
   }
 
   function render() {

@@ -338,6 +338,7 @@ async function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.refreshModels', run(refresh)));
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.configure', run(async () => management.open())));
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.openPanel', run(async () => management.open())));
+  require('./fast-context/config-ui.cjs').registerFastContext({ vscode, context });
   const saveFusionChoice = async uid => {
     const settings = vscode.workspace.getConfiguration('devin.acp'); const preferences = globalSetting(settings, 'agentPreferences');
     const receipt = readReceipt(root, context.extensionPath), keys = ['devin.acp.agentPreferences', 'devin-cli', 'model'];
@@ -451,6 +452,7 @@ async function activate(context) {
   const updater = require('./update.cjs').createUpdateHost({ vscode, context,
     onChange: () => management?.publishUpdates?.() });
   management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError, updater,
+    fastContext: require('./fast-context/config-ui.cjs').createFastContextHost({ vscode, context }),
     restartApp: () => require('./runtime/app-restart.cjs').restartApp({ vscode, spawn }),
     readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
   let contextObserver;

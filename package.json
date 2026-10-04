@@ -2,7 +2,7 @@
   "name": "devin-fusion-byok",
   "displayName": "Devin Fusion BYOK",
   "description": "Import OpenAI- and Anthropic-compatible models into Devin Local and native Fusion through runtime bridges.",
-  "version": "0.3.40",
+  "version": "0.3.42",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -25,6 +25,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.cjs",
+    "mcp:fast-context": "node src/fast-context/server.cjs",
     "package": "node scripts/package.cjs",
     "vscode:uninstall": "node src/lifecycle/uninstall.cjs"
   },
@@ -53,6 +54,10 @@
       {
         "command": "devinFusionByok.contextDetails",
         "title": "Fusion BYOK：上下文与性能"
+      },
+      {
+        "command": "devinFusionByok.fastContextMcp",
+        "title": "Fusion BYOK：Fast Context MCP 接入配置"
       },
       {
         "command": "devinFusionByok.goal",

@@ -68,6 +68,38 @@
 
 测试版：已用模拟连接做自动化测试，尚未在真实 Devin 窗口完成端到端验收，欢迎反馈。
 
+## Fast Context MCP（实验性）
+
+把自然语言代码检索提供给其他支持 MCP 的 Harness：输入问题，返回相关文件、行号及代码片段。复用 Devin/Windsurf 的 Fast Context 检索接口，**不是普通关键词搜索，也不是另开一轮通用助手对话**。
+
+打开 **Fusion BYOK 控制面板 → Fast Context** 标签页，选择允许搜索的项目，点 **复制提示词** 发给目标 Harness 里的 Agent，它会按提示词把 `fusion-fast-context` 合并进自己的 MCP 配置并验证；也可以 **复制配置 JSON** 手动合并，或在命令面板运行 **Fusion BYOK：Fast Context MCP 接入配置**。不要覆盖其他服务。插件升级后需重新复制，以更新安装路径。
+
+也可以直接使用源码入口：
+
+```json
+{
+  "mcpServers": {
+    "fusion-fast-context": {
+      "command": "/absolute/path/to/node",
+      "args": [
+        "/absolute/path/to/devin-fusion-byok/src/fast-context/server.cjs",
+        "--root",
+        "/absolute/path/to/project"
+      ]
+    }
+  }
+}
+```
+
+- 需要 **Node.js 22.16+（推荐 24 LTS）** 和 ripgrep；自动查找 PATH 或 macOS Devin 自带的 ripgrep，也可通过 `FUSION_FAST_CONTEXT_RG` 指定其绝对路径。不依赖正在运行的 Devin 窗口。
+- 提供 `fast_context_search`（`query`、`max_turns` 1–5、`max_results` 1–20、`include_content`）与 `fast_context_status`。默认最多三轮搜索、另一次最终答案请求；遇到模型格式错误，最多追加一次纠正请求，不猜测执行。每次搜索总时限 120 秒，同一 MCP 进程只接受一次搜索，支持取消。
+- 使用本机 Devin 桌面的已有登录记录；也可由环境变量 `WINDSURF_API_KEY` 提供凭证。不把密钥写入生成的配置，不提供提取密钥工具。**使用官方账号权限及额度，不走 BYOK 供应商**；账号或团队禁用时直接报错。
+- 问题、目录信息和选中的代码片段会发往官方服务。只搜索启动时指定的项目；可追加 `--exclude pattern`。默认遵守 ignore 规则，并排除常见凭证文件、依赖、构建产物、软链接和硬链接。**这不是秘密识别器**：不要选择包含敏感内容的项目，额外排除私有目录。
+- 仅在内存中创建只读快照，不运行模型给出的 shell 命令，不写入项目。默认检查最多 3,000 个候选文件、8 MiB 文本、每文件 512 KiB、20 万行；被限制的结果明确标记 `partial`。读取失败、二进制等跳过数量另列。大仓库应选择更小的项目根目录。
+- 检索是尽力而为，不保证找全；返回前核对文件内容与行号，修改代码前仍需自行复查。服务内部接口变化可能导致不兼容，错误不会伪装成“没找到”。
+
+配置命令只打开一份未保存的 JSON，面板只把提示词或配置复制到剪贴板，插件本身不自动注册其他 Harness、不重启应用、不启动后台监听端口。单独运行的 MCP 由目标 Harness 管理，停用 VS Code 插件不会结束它；停用 MCP 请在目标 Harness 中移除或关闭该服务。
+
 ## 自动继续（默认关闭）
 
 在 **设置** 页可分别开启：
@@ -102,7 +134,10 @@
 ```bash
 npm test          # 运行测试
 npm run package   # 生成 VSIX
+npm run mcp:fast-context -- --root /absolute/project
 ```
+
+Fast Context 真实接口验收（仅发送临时合成代码，可能消耗额度）：`FUSION_FAST_CONTEXT_LIVE=1 node scripts/fast-context-smoke.cjs`。
 
 ## 交流
 
