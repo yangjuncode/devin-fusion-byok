@@ -535,6 +535,84 @@ test('mid-stream failure after emitted output is not retried', async t => {
   assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
 });
 
+test('stream error event upstream_error code classifies as HTTP 502 and retries', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    if (calls === 1) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(event({ type: 'error', error: { type: 'server_error', code: 'upstream_error', message: 'Upstream service temporarily unavailable' }, sequence_number: 0 }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.output_text.delta', delta: 'Recovered' }) +
+      event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 2, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Recovered');
+  assert.equal(calls, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-retry' && l.code === 'upstream_http' && l.status === 502));
+});
+
+test('mid-stream error event status surfaces provider HTTP error text', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
+    res.write(event({ type: 'error', error: { type: 'server_error', code: 'upstream_error', message: 'Upstream service temporarily unavailable' }, sequence_number: 8 }));
+    res.end();
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'PartialProvider returned HTTP 502.');
+  assert.equal(calls, 1);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 502));
+});
+
+test('stream error event with terminal code is not retried', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'error', error: { type: 'invalid_request_error', code: 'invalid_request_error', message: 'bad request' }, sequence_number: 0 }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 400.');
+  assert.equal(calls, 1);
+  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 400));
+});
+
+test('response.failed error details contribute upstream status', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.failed', sequence_number: 1, response: { status: 'failed', error: { type: 'invalid_request_error', code: 'invalid_api_key', message: 'bad key' } } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 401.');
+  assert.equal(calls, 1);
+  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
+});
+
+test('flat error event rate limit code retries transparently as HTTP 429', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    if (calls === 1) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(event({ type: 'error', code: 'rate_limit_exceeded', message: 'slow down' }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 2, retryDelayMs: 1 });
+  await fetch(app.url);
+  assert.equal(calls, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-retry' && l.code === 'upstream_http' && l.status === 429));
+});
+
 test('Codex 专线供应商注入 Responses Lite 身份头与必需字段', async t => {
   const app = await bridge(t, async (req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });

@@ -178,6 +178,8 @@ function processor(id, uid, chat, emit) {
       if (!data || data.error) {
         const err = new Error('Upstream stream error');
         err.code = 'upstream_stream_error';
+        const status = streamErrorStatus(data);
+        if (status) err.upstreamStatus = status;
         throw err;
       }
       const next = usageOf(data, chat);
@@ -214,6 +216,8 @@ function processor(id, uid, chat, emit) {
           if (data.response?.status && data.response.status !== 'completed') {
             const err = new Error('Unexpected completion status');
             err.code = 'upstream_stream_error';
+            const status = streamErrorStatus(data);
+            if (status) err.upstreamStatus = status;
             throw err;
           }
           for (const [index, value] of (data.response?.output || []).entries()) await item(value, index, true);
@@ -224,6 +228,8 @@ function processor(id, uid, chat, emit) {
         case 'error': {
           const err = new Error('Upstream response failed');
           err.code = 'upstream_stream_error';
+          const status = streamErrorStatus(data);
+          if (status) err.upstreamStatus = status;
           throw err;
         }
       }
@@ -264,6 +270,45 @@ function processor(id, uid, chat, emit) {
 // 上游临时错误的可重试判定：与 auto-continue 的 TRANSIENT_HTTP_RE 口径一致，
 // 4xx 中只有 408/429 值得重试，其余视为确定性失败。
 const RETRYABLE_HTTP_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+// 网关把上游失败塞进 SSE error 事件时，HTTP 状态常被替换成字符串错误码
+// （CLIProxyAPI 的 upstream_error、OpenAI 的 rate_limit_exceeded 等）。
+// 数字字段直接采信，字符串错误码映射回代表性状态，让流内错误与真实
+// HTTP 状态走同一套重试/终止判定。
+const STREAM_ERROR_NUMERIC_KEYS = ['status', 'statusCode', 'status_code', 'http_status', 'httpStatus', 'code'];
+const STREAM_ERROR_STATUS_RE = /(?:status|http|code)[^0-9]{0,12}([45]\d{2})\b/i;
+const STREAM_ERROR_STATUSES = new Map([
+  ['request_timeout', 408],
+  ['rate_limit_exceeded', 429], ['rate_limit_error', 429], ['too_many_requests', 429],
+  ['internal_server_error', 500], ['server_error', 500], ['api_error', 500], ['internal_error', 500],
+  ['upstream_error', 502], ['bad_gateway', 502], ['bad_gateway_error', 502],
+  ['service_unavailable', 503], ['overloaded', 503], ['overloaded_error', 503],
+  ['gateway_timeout', 504],
+  ['invalid_request_error', 400], ['invalid_request', 400], ['billing_error', 400],
+  ['invalid_api_key', 401], ['authentication_error', 401], ['unauthorized', 401], ['unauthenticated', 401],
+  ['insufficient_quota', 403], ['permission_error', 403], ['permission_denied', 403], ['forbidden', 403],
+  ['model_not_found', 404], ['not_found', 404], ['not_found_error', 404],
+  ['request_too_large', 413]
+]);
+// 依次检查 error 对象、response.error、事件本体；数值状态 > message 文本
+// 里的 status/http 数字 > code/type 字符串映射。返回 0 表示识别不出。
+function streamErrorStatus(data) {
+  for (const detail of [data?.error, data?.response?.error, data]) {
+    if (!detail || typeof detail !== 'object') continue;
+    for (const key of STREAM_ERROR_NUMERIC_KEYS) {
+      const value = detail[key];
+      const status = typeof value === 'number' ? value
+        : typeof value === 'string' && /^\s*[45]\d{2}\s*$/.test(value) ? Number(value) : NaN;
+      if (status >= 400 && status <= 599) return status;
+    }
+    const message = typeof detail.message === 'string' ? detail.message.match(STREAM_ERROR_STATUS_RE) : null;
+    if (message) return Number(message[1]);
+    for (const key of ['code', 'type']) {
+      const mapped = STREAM_ERROR_STATUSES.get(detail[key]);
+      if (mapped) return mapped;
+    }
+  }
+  return 0;
+}
 const RETRYABLE_CODES = new Set([
   'upstream_network', 'upstream_timeout', 'upstream_content_type',
   'upstream_stream_error', 'upstream_stream_incomplete',
@@ -427,12 +472,18 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
           }
         } catch (err) {
           if (classifiedCode !== 'upstream_timeout') {
-            const allowedCodes = new Set([
-              'upstream_timeout', 'upstream_http', 'upstream_content_type',
-              'upstream_stream_error', 'upstream_stream_incomplete',
-              'upstream_invalid_tool', 'upstream_invalid_json', 'upstream_network'
-            ]);
-            classifiedCode = allowedCodes.has(err?.code) ? err.code : 'upstream_stream_error';
+            const upstreamStatus = Number.isSafeInteger(err?.upstreamStatus) ? err.upstreamStatus : 0;
+            if (upstreamStatus >= 400 && upstreamStatus <= 599) {
+              classifiedCode = 'upstream_http';
+              status = upstreamStatus;
+            } else {
+              const allowedCodes = new Set([
+                'upstream_timeout', 'upstream_http', 'upstream_content_type',
+                'upstream_stream_error', 'upstream_stream_incomplete',
+                'upstream_invalid_tool', 'upstream_invalid_json', 'upstream_network'
+              ]);
+              classifiedCode = allowedCodes.has(err?.code) ? err.code : 'upstream_stream_error';
+            }
           }
           throw err;
         }
