@@ -520,7 +520,33 @@ test('terminal HTTP error is not retried', async t => {
   assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
 });
 
-test('mid-stream failure after emitted output is not retried', async t => {
+test('mid-stream failure after emitted output is retried on a fresh message id', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (calls === 1) {
+      res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
+      res.write(event({ type: 'response.failed', error: { message: 'boom' } }));
+      res.end();
+      return;
+    }
+    res.end(event({ type: 'response.output_text.delta', delta: 'Complete' }) +
+      event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const partial = result.messages.find(m => str(m, 3) === 'Partial');
+  const complete = result.messages.find(m => str(m, 3) === 'Complete');
+  assert.ok(partial && complete);
+  assert.notEqual(str(partial, 1), str(complete, 1));
+  // 旧片段消息收到错误终止帧，新消息正常结束
+  assert.ok(result.messages.some(m => str(m, 1) === str(partial, 1) && num(m, 5) === 13));
+  assert.ok(result.messages.some(m => str(m, 1) === str(complete, 1) && num(m, 5) === 2));
+  assert.equal(calls, 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-retry' && l.code === 'upstream_stream_error'));
+});
+
+test('mid-stream failure keeps legacy output when retries are disabled', async t => {
   let calls = 0;
   const app = await bridge(t, async (req, res) => {
     calls++;
@@ -528,7 +554,7 @@ test('mid-stream failure after emitted output is not retried', async t => {
     res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
     res.write(event({ type: 'response.failed', error: { message: 'boom' } }));
     res.end();
-  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  }, 'openai-responses', {}, () => {}, {}, { retries: 0, retryDelayMs: 1 });
   const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'PartialProvider response could not be completed.');
   assert.equal(calls, 1);
@@ -559,13 +585,13 @@ test('mid-stream error event status surfaces provider HTTP error text', async t 
   const app = await bridge(t, async (req, res) => {
     calls++;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
-    res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
+    if (calls === 1) res.write(event({ type: 'response.output_text.delta', delta: 'Partial' }));
     res.write(event({ type: 'error', error: { type: 'server_error', code: 'upstream_error', message: 'Upstream service temporarily unavailable' }, sequence_number: 8 }));
     res.end();
-  }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+  }, 'openai-responses', {}, () => {}, {}, { retries: 2, retryDelayMs: 1 });
   const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'PartialProvider returned HTTP 502.');
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 502));
 });
 

@@ -343,6 +343,10 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
   };
   let status = 0;
   let classifiedCode = 'upstream_network';
+  // messageId 是发给客户端的消息 id：中途断流重发时换新，已输出的片段
+  // 原样保留（以错误终止帧封闭）。id 只作 requestId 贯穿日志与指标。
+  let messageId = id;
+  let attemptEmitted = false;
   const record = event => { try { log(event); } catch { /* Diagnostics cannot fail a model request. */ } };
 
   const firstResponseLimit = Number.isSafeInteger(timeouts?.firstResponseMs) && timeouts.firstResponseMs > 0
@@ -368,9 +372,11 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     signal?.addEventListener('abort', finish, { once: true });
     res.once('close', finish);
   });
-  // 已向客户端输出内容后无法透明重发（会产生重复输出），只能走原错误路径。
-  const canRetry = () => !res.headersSent &&
-    (classifiedCode === 'upstream_http' ? RETRYABLE_HTTP_STATUS.has(status) : RETRYABLE_CODES.has(classifiedCode));
+  // 已向客户端输出内容后无法原样重发（会拼接重复输出），但流式阶段只可能
+  // 输出过文本/思考片段——工具调用只在 finish 时整块发出，断流重发永远不会
+  // 重复执行工具。因此已输出时也可重试：旧消息以 13 终止，换新 id 重来。
+  const canRetry = () => classifiedCode === 'upstream_http'
+    ? RETRYABLE_HTTP_STATUS.has(status) : RETRYABLE_CODES.has(classifiedCode);
 
   const emitCancelled = () => {
     outcome = 'cancelled';
@@ -388,8 +394,8 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     }
 
     try {
-      await write(textChunk(id, errorText));
-      await write(stopChunk(id, 13, route.uid || request.modelUid));
+      await write(textChunk(messageId, errorText));
+      await write(stopChunk(messageId, 13, route.uid || request.modelUid));
       res.end(frame(Buffer.from('{}'), 2));
     } catch {
       if (!res.destroyed && !res.writableEnded) res.destroy();
@@ -463,7 +469,11 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
           }
         }
 
-        const stream = processor(id, route.uid || request.modelUid, chat, write);
+        attemptEmitted = false;
+        const stream = processor(messageId, route.uid || request.modelUid, chat, async chunk => {
+          attemptEmitted = true;
+          return write(chunk);
+        });
         try {
           for await (const event of events(rawChunksWithTimeout(upstream.body))) {
             metrics.event(event, chat);
@@ -508,6 +518,12 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
           upstreamController.abort();
           const delay = fixedRetryWait ?? retryBackoffMs(attempts);
           record({ event: 'chat-retry', model: route.model, status, code: classifiedCode, attempts, delay, requestId: id });
+          if (attemptEmitted) {
+            try { await write(stopChunk(messageId, 13, route.uid || request.modelUid)); }
+            catch { return emitCancelled(); }
+            messageId = randomUUID();
+            attemptEmitted = false;
+          }
           await pause(delay);
           continue;
         }
