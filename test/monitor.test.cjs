@@ -117,6 +117,24 @@ test('persists private-safe records, resolves real SQLite IDs read-only and surv
   assert.equal(missing.sessionStatus, 'unavailable'); assert.equal(missing.records[0].sessionId, null);
 });
 
+test('acp transcript databases resolve namespaced tool call ids', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-monitor-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const db = path.join(root, 'sessions.db');
+  execFileSync('/usr/bin/sqlite3', [db, "CREATE TABLE tool_call_state(session_id TEXT,tool_call_id TEXT); CREATE TABLE message_nodes(session_id TEXT,chat_message TEXT);"]);
+  const acpDir = path.join(root, 'acp-messages');
+  fs.mkdirSync(acpDir);
+  const sessionDb = path.join(acpDir, '85679d72-69f5-4c79-b444-1e760facbd98.db');
+  execFileSync('/usr/bin/sqlite3', [sessionDb, "CREATE TABLE messages(position INTEGER PRIMARY KEY, kind TEXT, payload TEXT); INSERT INTO messages(kind,payload) VALUES('tool_call','{\"content\":{\"toolCallId\":\"sk::exec:0#abc123\"}}'),('agent_message','{\"unrelated\":true}');"]);
+  const monitor = createMonitor({ root, databasePath: db, acpMessagesDir: acpDir });
+  const record = tracker().value.finish('success', 200);
+  monitor.record({ ...record, id: 'bot-9', toolIds: ['exec:0#abc123'] });
+  const snapshot = await monitor.snapshot();
+  assert.equal(snapshot.sessionStatus, 'ready');
+  assert.equal(snapshot.records[0].sessionId, '85679d72-69f5-4c79-b444-1e760facbd98');
+  assert.equal(snapshot.records[0].attribution, 'tool-id');
+});
+
 test('native tracker parses forwarded chat frames and keeps the response message id', () => {
   const { createNativeTracker } = require('../src/runtime/monitor.cjs');
   const wire = require('../src/protocol/wire.cjs');
@@ -131,7 +149,7 @@ test('native tracker parses forwarded chat frames and keeps the response message
   const stream = Buffer.concat([
     wire.frame(textChunk('msg-9', 'hello')),
     wire.frame(toolChunk('msg-9', [{ id: 'call-1', name: 'exec', arguments: '{}' }])),
-    wire.frame(stopChunk('msg-9', 10, 'swe-2-max')),
+    wire.frame(stopChunk('msg-9', 10, 'swe-2-max', { inputTokens: 165141, outputTokens: 1348, cachedTokens: 164864 })),
     wire.frame(Buffer.from('{}'), 2),
   ]);
   tracker.data(stream.subarray(0, 3));
@@ -146,7 +164,28 @@ test('native tracker parses forwarded chat frames and keeps the response message
   assert.equal(result.hasTools, true);
   assert.deepEqual(result.toolIds, ['call-1']);
   assert.equal(result.httpStatus, 200);
+  // field 7 ModelUsageStats 解码回来：面板口径输入含缓存（input+cache_read）
+  assert.equal(result.inputTokens, 165141);
+  assert.equal(result.outputTokens, 1348);
+  assert.equal(result.cachedTokens, 164864);
   assert.ok(result.durationMs >= 0 && result.firstResponseMs !== null && result.firstTextMs !== null);
+});
+
+test('native tracker falls back to accumulated delta_tokens when usage is absent', () => {
+  const { createNativeTracker } = require('../src/runtime/monitor.cjs');
+  const wire = require('../src/protocol/wire.cjs');
+  const { s, v, frame } = wire;
+  const tracker = createNativeTracker({
+    upstream: { statusCode: 200, headers: { 'content-type': 'application/connect+proto' } },
+  });
+  // 官方流中途被断：正文块带 delta_tokens(4)，但没有末尾的 usage(7)
+  const chunk = Buffer.concat([s(1, 'bot-x'), s(3, 'partial'), v(4, 40)]);
+  tracker.data(frame(chunk));
+  tracker.data(frame(Buffer.concat([v(4, 30)])));
+  const result = tracker.finish('end', 200);
+  assert.equal(result.id, 'bot-x');
+  assert.equal(result.inputTokens, null);
+  assert.equal(result.outputTokens, 70);
 });
 
 test('native tracker falls back to stream uid and marks aborts cancelled', () => {

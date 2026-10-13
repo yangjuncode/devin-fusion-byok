@@ -143,9 +143,26 @@ function summarize(records) {
   return result;
 }
 const NATIVE_STREAM_MAX = 64 * 1024 * 1024;
+// GetChatMessageResponse.usage（field 7）内嵌 ModelUsageStats：2=输入
+// （与缓存读取互斥）、3=输出、4=缓存写入、5=缓存读取、7=消息 id、9=模型 uid。
+// 面板口径的“输入”含缓存部分，解码时把 cache_read 加回 input。
+function readUsageStats(buffer) {
+  let stats;
+  try { stats = wire.parseFields(buffer); } catch { return null; }
+  const intAt = n => {
+    const value = stats.find(f => f.number === n && f.wire === 0)?.value;
+    if (value === undefined) return null;
+    return typeof value === 'bigint' ? (value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null) : value;
+  };
+  const strAt = n => stats.find(f => f.number === n && f.wire === 2)?.value.toString('utf8');
+  const input = intAt(2), cached = intAt(5);
+  return { inputTokens: input !== null || cached !== null ? (input ?? 0) + (cached ?? 0) : null,
+    outputTokens: intAt(3), cachedTokens: cached, reasoningTokens: null,
+    messageId: identifier(strAt(7) ?? ''), modelUid: identifier(strAt(9) ?? '') };
+}
 // 官方 GetChatMessage 转发请求的被动观测器：不改动任何字节，只增量解析
-// Connect 帧中已公开的字段（1=消息 id，3=正文，5=结束原因，6=工具调用，
-// 9=推理，20=模型 uid）。官方协议没有可靠的 token 字段，用量按“未上报”。
+// Connect 帧中已公开的字段（1=消息 id，3=正文，4=单块输出 token，5=结束原因，
+// 6=工具调用，7=用量统计，9=推理，20=模型 uid）。
 function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid = '', t0, startedAt, now = () => performance.now(), onFinish } = {}) {
   const start = Number.isFinite(t0) ? t0 : now();
   const fallbackId = crypto.randomUUID();
@@ -155,7 +172,8 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
   let pending = Buffer.alloc(0);
   let firstResponse = null, firstText = null, firstOutput = null, lastOutput = null;
   let messageId = '', responseModelUid = '', trailerCode = null;
-  let hasTools = false, hasReasoning = false, finished = false;
+  let hasTools = false, hasReasoning = false, finished = false, terminalAt = null;
+  let usage = null, deltaTokens = 0;
   const toolIds = new Set();
 
   let uid = identifier(modelUid) || '';
@@ -174,6 +192,11 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
     try { fields = wire.parseFields(buffer); } catch { return; }
     const elapsed = now() - start;
     for (const field of fields) {
+      if (field.wire === 0) {
+        if (field.number === 5) terminalAt ??= elapsed;
+        else if (field.number === 4 && typeof field.value === 'number' && field.value > 0) deltaTokens += field.value;
+        continue;
+      }
       if (field.wire !== 2) continue;
       if (field.number === 1) { if (!messageId) messageId = identifier(field.value.toString('utf8')) || ''; }
       else if (field.number === 3 && field.value.length) { firstText ??= elapsed; firstOutput ??= elapsed; lastOutput = elapsed; }
@@ -181,7 +204,8 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
       else if (field.number === 6) {
         hasTools = true; firstOutput ??= elapsed; lastOutput = elapsed;
         try { const tid = identifier(wire.str(field.value, 1)); if (tid) toolIds.add(tid); } catch {}
-      } else if (field.number === 20) responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
+      } else if (field.number === 7) { usage = readUsageStats(field.value) || usage; }
+      else if (field.number === 20) responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
     }
   }
 
@@ -223,11 +247,16 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
     }
     const status = state === 'abort' ? 'cancelled' : state === 'end' && (httpStatus || 200) < 400 ? 'success' : 'error';
     const code = status === 'success' ? null : state === 'abort' ? 'client_cancelled' : trailerCode || (httpStatus >= 400 ? 'official_http' : 'upstream_stream');
-    const record = { schemaVersion: 3, id: messageId || fallbackId, startedAt: startedAt || new Date().toISOString(),
-      model: uid || responseModelUid || 'official', providerId: 'official', effort: null,
+    const outputTokens = usage?.outputTokens ?? (deltaTokens > 0 ? deltaTokens : null);
+    const reasoningTokens = usage?.reasoningTokens ?? null;
+    const record = { schemaVersion: 3, id: messageId || usage?.messageId || fallbackId, startedAt: startedAt || new Date().toISOString(),
+      model: uid || responseModelUid || usage?.modelUid || 'official', providerId: 'official', effort: null,
       status, code, httpStatus: httpStatus || 0, firstResponseMs: firstResponse, firstOutputMs: firstOutput, firstTextMs: firstText,
       durationMs: Math.max(0, now() - start),
       outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
+      inputTokens: usage?.inputTokens ?? null, outputTokens, cachedTokens: usage?.cachedTokens ?? null, reasoningTokens,
+      visibleTokens: outputTokens !== null && (!hasReasoning || reasoningTokens !== null) ? outputTokens - (reasoningTokens ?? 0) : null,
+      decodeMs: firstText !== null && terminalAt !== null && terminalAt > firstText ? terminalAt - firstText : null,
       hasTools, hasReasoning, toolIds: [...toolIds].slice(-32), messageIds: [] };
     try { onFinish?.(record); } catch { /* 统计失败不影响转发。 */ }
     return record;
@@ -250,6 +279,31 @@ async function sessionMatches(databasePath, ids, toolIds = []) {
     child.stdin.end(sql);
   });
 }
+// ACP 内嵌会话（含 sidekick）的 transcript 不进 CLI sessions.db，而是每个会话
+// 一个 acp-messages/<uuid>.db；tool_call 行 payload.content.toolCallId 可能带
+// "sk::" 等命名空间前缀，按后缀匹配记录的 toolIds。
+const ACP_DB = /^[0-9a-f-]{36}\.db$/i;
+async function acpMatches(dir, toolIds) {
+  const wanted = [...new Set((toolIds || []).map(identifier).filter(Boolean))];
+  if (!wanted.length) return [];
+  let names;
+  try { names = await fs.promises.readdir(dir); } catch { return []; }
+  const rows = [];
+  await Promise.all(names.filter(name => ACP_DB.test(name)).map(name => new Promise(resolve => {
+    const sql = `.timeout 2000\nSELECT DISTINCT json_extract(payload,'$.content.toolCallId') AS tid FROM messages WHERE kind='tool_call';\n`;
+    const child = execFile('/usr/bin/sqlite3', ['-readonly', '-json', path.join(dir, name)], { timeout: 10000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      try {
+        const tids = JSON.parse(stdout || '[]').map(row => row.tid).filter(t => typeof t === 'string');
+        const sessionId = name.slice(0, -3);
+        for (const id of wanted) if (tids.some(tid => tid === id || tid.endsWith(id))) rows.push({ session_id: sessionId, message_id: id, kind: 'tool' });
+      } catch {}
+      resolve();
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(sql);
+  })));
+  return rows;
+}
 function associate(records, rows) {
   const mapping = new Map();
   for (const row of rows) {
@@ -269,7 +323,8 @@ function associate(records, rows) {
       attribution: sessions?.size === 1 ? attribution : sessions?.size > 1 ? 'ambiguous' : 'unassigned' };
   });
 }
-function createMonitor({ root, databasePath = path.join(os.homedir(), '.local/share/devin/cli/sessions.db') }) {
+function createMonitor({ root, databasePath = path.join(os.homedir(), '.local/share/devin/cli/sessions.db'),
+  acpMessagesDir = path.resolve(root, '..', '..', 'acp-messages') } = {}) {
   const file = path.join(root, 'monitor.jsonl');
   let records = [], storageError = false, pending = null, cached = null, cachedAt = 0, revision = 0;
   try {
@@ -301,8 +356,12 @@ function createMonitor({ root, databasePath = path.join(os.homedir(), '.local/sh
     const current = records.slice(), currentRevision = revision;
     pending = (async () => {
       let rows = [], sessionStatus = 'ready';
-      try { rows = await sessionMatches(databasePath, current.map(r => r.id), [...new Set(current.flatMap(r => r.toolIds || []))]); }
-      catch { sessionStatus = 'unavailable'; }
+      const toolIds = [...new Set(current.flatMap(r => r.toolIds || []))];
+      const [dbRows, acpRows] = await Promise.all([
+        sessionMatches(databasePath, current.map(r => r.id), toolIds).catch(() => { sessionStatus = 'unavailable'; return []; }),
+        acpMatches(acpMessagesDir, toolIds).catch(() => []),
+      ]);
+      rows = [...dbRows, ...acpRows];
       const publicRecords = associate(current, rows).reverse();
       const groups = new Map();
       for (const r of publicRecords) {
