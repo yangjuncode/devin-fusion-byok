@@ -462,6 +462,27 @@ test('malformed non-SSE content-type outputs invalid format message', async t =>
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_content_type'));
 });
 
+test('mid-stream EOF after thinking-only output retries transparently', async t => {
+  let calls = 0;
+  const app = await bridge(t, async (req, res) => {
+    calls++;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (calls === 1) {
+      res.write(event({ type: 'response.reasoning.delta', output_index: 0, delta: 'Pondering' }));
+      res.write(event({ type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', call_id: 'c1', name: 'sidekick', arguments: '{"prompt":"x"}' } }));
+      res.end();
+      return;
+    }
+    res.end(event({ type: 'response.output_text.delta', delta: 'Recovered' }) +
+      event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  }, 'openai-responses', {}, () => {}, {}, { retries: 3, retryDelayMs: 1 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Recovered');
+  assert.equal(num(result.messages.at(-1), 5), 2);
+  assert.equal(calls, 2);
+  assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.code === 'upstream_stream_incomplete').length, 1);
+});
+
 test('retry backoff follows 1,1,2,2,3,3,5,5,8,8,13,13,21,21 then caps at 30s', () => {
   const expected = [1, 1, 2, 2, 3, 3, 5, 5, 8, 8, 13, 13, 21, 21, 30, 30, 30, 30].map(s => s * 1000);
   assert.deepEqual(expected.map((_, i) => retryBackoffMs(i + 1)), expected);

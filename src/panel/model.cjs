@@ -85,6 +85,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     fusionChoices: Object.values(catalog.fusions).map(fusion => ({ uid: fusion.uid, label: fusion.label })),
     autoContinueOnProviderError: config.autoContinueOnProviderError === true,
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
+    autoContinueMaxAttempts: Number.isSafeInteger(config.autoContinueMaxAttempts) && config.autoContinueMaxAttempts >= 0 && config.autoContinueMaxAttempts <= 100 ? config.autoContinueMaxAttempts : 30,
     upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
     autoByok: config.autoByok === true,
     nativeModelFilter: typeof config.nativeModelFilter === 'string' ? config.nativeModelFilter : DEFAULT_NATIVE_MODEL_FILTER,
@@ -276,6 +277,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
+      case 'setAutoContinueMaxAttempts': {
+        const count = payload.count;
+        if (!Number.isSafeInteger(count) || count < 0 || count > 100) fail('自动续接次数必须是 0 到 100 之间的整数。');
+        config.autoContinueMaxAttempts = count;
+        break;
+      }
       case 'setAutoByok': config.autoByok = boolean(payload.enabled, 'Auto-BYOK'); break;
       case 'setNativeModelFilter': {
         const value = payload.value;

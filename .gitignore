@@ -7,3 +7,4 @@ qa/
 *.log
 logs/
 *.local
+github.com/

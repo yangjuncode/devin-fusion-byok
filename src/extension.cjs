@@ -147,7 +147,8 @@ async function activate(context) {
         isEnabled: () => config().enabled !== false && (config().autoContinueOnProviderError === true || config().autoContinueUntilPlanComplete === true),
         getOptions: () => ({
           onProviderError: config().autoContinueOnProviderError === true,
-          untilPlanComplete: config().autoContinueUntilPlanComplete === true
+          untilPlanComplete: config().autoContinueUntilPlanComplete === true,
+          maxAttempts: config().autoContinueMaxAttempts
         }),
         log
       });

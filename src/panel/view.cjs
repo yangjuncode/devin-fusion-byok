@@ -458,8 +458,28 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '遇到服务商错误时自动继续回复' }),
-          element('span', { class: 'hint', text: '当模型回复以“Provider response could not be completed”结尾或返回临时网络错误时自动发送 continue，重复直到正常响应。' }),
+          element('span', { class: 'hint', text: '当模型回复以“Provider response could not be completed”结尾或返回临时网络错误时自动发送 continue；间隔按 1,2,4,8,16,32 秒递增、封顶 60 秒，达到下方最大次数后停止。' }),
           element('span', { class: 'subtle-warning', text: '注意：若服务商按 Token 计费，频繁重试可能产生额外费用。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'number',
+          class: 'retry-count',
+          min: '0',
+          max: '100',
+          step: '1',
+          value: String(state.autoContinueMaxAttempts ?? 30),
+          disabled: state.enabled === false,
+          'aria-label': '自动继续最大次数',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const count = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setAutoContinueMaxAttempts', { count }), '正在保存续接次数…')
+              .then(ok => { if (!ok) event.target.value = String(state.autoContinueMaxAttempts ?? 30); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '自动继续最大次数' }),
+          element('span', { class: 'hint', text: '服务商错误续接与下方待办续接共用的 continue 上限，防止无限循环；默认 30 次，填 0 表示不自动续接，上限 100。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'number',
@@ -479,7 +499,7 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '上游错误自动重试' }),
-          element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出任何内容时生效，默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
+          element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出正文或工具调用时生效（仅推理输出不阻止重试），默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'checkbox',
@@ -493,7 +513,7 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '有未完成待办时自动继续' }),
-          element('span', { class: 'hint', text: '当检测到会话中有未完成的结构化待办列表（Plan）时自动发送 continue 推动执行，直到全部待办完成。无待办或非结构化计划时不会自动循环，随时可通过停止或权限拦截打断。' }))),
+          element('span', { class: 'hint', text: '当检测到会话中有未完成的结构化待办列表（Plan）时自动发送 continue 推动执行，直到全部待办完成或达到上方最大次数。无待办或非结构化计划时不会自动循环，随时可通过停止或权限拦截打断。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'checkbox',

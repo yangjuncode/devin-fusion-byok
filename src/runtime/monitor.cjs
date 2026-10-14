@@ -79,7 +79,8 @@ function createTracker({ id, request, route, provider, now = () => performance.n
       const tps = status === 'success' && !hasTools && visibleTokens > 0 && decodeMs > 0 ? visibleTokens * 1000 / decodeMs : null;
       return { schemaVersion: 3, firstResponseMs: firstResponse, id, startedAt, model: route.model, providerId: provider.id || route.providerId || '', effort: route.effort || null,
         status, code, httpStatus, inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null,
-        cachedTokens: usage?.cachedTokens ?? null, reasoningTokens: usage?.reasoningTokens ?? null,
+        cachedTokens: usage?.cachedTokens ?? null, cacheWriteTokens: usage?.cacheWriteTokens ?? null,
+        reasoningTokens: usage?.reasoningTokens ?? null,
         firstOutputMs: firstOutput, firstTextMs: firstText, durationMs,
         outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
         tps, decodeMs, visibleTokens, hasTools, hasReasoning,
@@ -97,7 +98,7 @@ function normalize(record) {
     code: identifier(record.code), httpStatus: token(record.httpStatus) ?? 0, usageComplete: record.usageComplete === true,
     messageIds: Array.isArray(record.messageIds) ? [...new Set(record.messageIds.map(identifier).filter(Boolean))].slice(-8) : [],
     sessionId: null, attribution: 'unassigned', role: 'unknown' };
-  for (const key of ['inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens']) result[key] = token(record[key]);
+  for (const key of ['inputTokens', 'outputTokens', 'cachedTokens', 'cacheWriteTokens', 'reasoningTokens']) result[key] = token(record[key]);
   for (const key of ['firstOutputMs', 'firstTextMs', 'durationMs', 'outputSpanMs']) result[key] = timing(record[key]);
   result.schemaVersion = [2, 3].includes(record.schemaVersion) ? record.schemaVersion : 1;
   result.toolIds = result.schemaVersion >= 2 && Array.isArray(record.toolIds) ? [...new Set(record.toolIds.map(identifier).filter(Boolean))].slice(-32) : [];
@@ -143,26 +144,9 @@ function summarize(records) {
   return result;
 }
 const NATIVE_STREAM_MAX = 64 * 1024 * 1024;
-// GetChatMessageResponse.usage（field 7）内嵌 ModelUsageStats：2=输入
-// （与缓存读取互斥）、3=输出、4=缓存写入、5=缓存读取、7=消息 id、9=模型 uid。
-// 面板口径的“输入”含缓存部分，解码时把 cache_read 加回 input。
-function readUsageStats(buffer) {
-  let stats;
-  try { stats = wire.parseFields(buffer); } catch { return null; }
-  const intAt = n => {
-    const value = stats.find(f => f.number === n && f.wire === 0)?.value;
-    if (value === undefined) return null;
-    return typeof value === 'bigint' ? (value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null) : value;
-  };
-  const strAt = n => stats.find(f => f.number === n && f.wire === 2)?.value.toString('utf8');
-  const input = intAt(2), cached = intAt(5);
-  return { inputTokens: input !== null || cached !== null ? (input ?? 0) + (cached ?? 0) : null,
-    outputTokens: intAt(3), cachedTokens: cached, reasoningTokens: null,
-    messageId: identifier(strAt(7) ?? ''), modelUid: identifier(strAt(9) ?? '') };
-}
-// 官方 GetChatMessage 转发请求的被动观测器：不改动任何字节，只增量解析
-// Connect 帧中已公开的字段（1=消息 id，3=正文，4=单块输出 token，5=结束原因，
-// 6=工具调用，7=用量统计，9=推理，20=模型 uid）。
+// 官方 GetChatMessage 转发请求的被动观测器：不改动任何字节，增量解析
+// Connect 帧中公开的字段（1=消息 id，3=正文，4=输出 token，5=结束原因，6=工具调用，
+// 7=用量元数据 ModelUsageStats，9=推理，20/23=模型 uid）。
 function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid = '', t0, startedAt, now = () => performance.now(), onFinish } = {}) {
   const start = Number.isFinite(t0) ? t0 : now();
   const fallbackId = crypto.randomUUID();
@@ -170,10 +154,11 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
   const framed = contentType.includes('connect+') || contentType.includes('grpc');
   const gzChunks = /gzip/.test(String(upstream?.headers?.['content-encoding'] || '').toLowerCase()) ? [] : null;
   let pending = Buffer.alloc(0);
-  let firstResponse = null, firstText = null, firstOutput = null, lastOutput = null;
+  let firstResponse = null, firstText = null, firstOutput = null, lastOutput = null, terminalAt = null;
   let messageId = '', responseModelUid = '', trailerCode = null;
-  let hasTools = false, hasReasoning = false, finished = false, terminalAt = null;
-  let usage = null, deltaTokens = 0;
+  let hasTools = false, hasReasoning = false, finished = false;
+  let metaUsage = null;
+  let topLevelOutputTokens = null;
   const toolIds = new Set();
 
   let uid = identifier(modelUid) || '';
@@ -193,8 +178,12 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
     const elapsed = now() - start;
     for (const field of fields) {
       if (field.wire === 0) {
-        if (field.number === 5) terminalAt ??= elapsed;
-        else if (field.number === 4 && typeof field.value === 'number' && field.value > 0) deltaTokens += field.value;
+        // 顶层 4=delta_tokens 仅为降级口径：BYOK 约定其携带末块输出总量，
+        // 官方若逐块增量上报则低估，最终以 7 号 ModelUsageStats 为准。
+        if (field.number === 4) {
+          const ot = token(field.value);
+          if (ot !== null) topLevelOutputTokens = ot;
+        }
         continue;
       }
       if (field.wire !== 2) continue;
@@ -204,8 +193,27 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
       else if (field.number === 6) {
         hasTools = true; firstOutput ??= elapsed; lastOutput = elapsed;
         try { const tid = identifier(wire.str(field.value, 1)); if (tid) toolIds.add(tid); } catch {}
-      } else if (field.number === 7) { usage = readUsageStats(field.value) || usage; }
-      else if (field.number === 20) responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
+      } else if (field.number === 20 || field.number === 23) {
+        responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
+      } else if (field.number === 7) {
+        try {
+          // ModelUsageStats 按子字段逐项合并而非整包覆盖：中间帧可能只带
+          // 部分计数（如仅 input），末帧补 output 时不能丢掉已读到的值。
+          const mf = wire.parseFields(field.value);
+          for (const sub of mf) {
+            if (sub.wire === 0) {
+              const val = token(sub.value);
+              if (val === null) continue;
+              const key = sub.number === 2 ? 'rawInput' : sub.number === 3 ? 'rawOutput' :
+                sub.number === 4 ? 'rawCacheWrite' : sub.number === 5 ? 'rawCached' : null;
+              if (key) (metaUsage ||= {})[key] = val;
+            } else if (sub.wire === 2 && sub.number === 9) {
+              const m = identifier(sub.value.toString('utf8'));
+              if (m) responseModelUid = m;
+            }
+          }
+        } catch { /* 忽略损坏的 metadata */ }
+      }
     }
   }
 
@@ -239,6 +247,7 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
   function finish(state, httpStatus) {
     if (finished) return null;
     finished = true;
+    terminalAt = now() - start;
     if (gzChunks?.length) {
       try {
         pending = zlib.gunzipSync(Buffer.concat(gzChunks), { maxOutputLength: NATIVE_STREAM_MAX });
@@ -247,16 +256,31 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
     }
     const status = state === 'abort' ? 'cancelled' : state === 'end' && (httpStatus || 200) < 400 ? 'success' : 'error';
     const code = status === 'success' ? null : state === 'abort' ? 'client_cancelled' : trailerCode || (httpStatus >= 400 ? 'official_http' : 'upstream_stream');
-    const outputTokens = usage?.outputTokens ?? (deltaTokens > 0 ? deltaTokens : null);
-    const reasoningTokens = usage?.reasoningTokens ?? null;
-    const record = { schemaVersion: 3, id: messageId || usage?.messageId || fallbackId, startedAt: startedAt || new Date().toISOString(),
-      model: uid || responseModelUid || usage?.modelUid || 'official', providerId: 'official', effort: null,
+    const durationMs = Math.max(0, terminalAt);
+
+    const cachedTokens = metaUsage?.rawCached ?? null;
+    const cacheWriteTokens = metaUsage?.rawCacheWrite ?? null;
+    let inputTokens = null;
+    if (metaUsage?.rawInput !== null && metaUsage?.rawInput !== undefined) {
+      inputTokens = metaUsage.rawInput + (cachedTokens ?? 0);
+    } else if (cachedTokens !== null) {
+      inputTokens = cachedTokens;
+    }
+    const outputTokens = metaUsage?.rawOutput ?? topLevelOutputTokens ?? null;
+    const reasoningTokens = null;
+    const visibleTokens = outputTokens !== null && !hasReasoning ? outputTokens : null;
+    const decodeMs = firstText !== null && terminalAt > firstText ? terminalAt - firstText : null;
+    const tps = status === 'success' && !hasTools && visibleTokens > 0 && decodeMs > 0 ? visibleTokens * 1000 / decodeMs : null;
+    const throughputTps = status === 'success' && outputTokens !== null && durationMs > 0 ? outputTokens * 1000 / durationMs : null;
+    const usageComplete = inputTokens !== null && outputTokens !== null;
+
+    const record = { schemaVersion: 3, id: messageId || fallbackId, startedAt: startedAt || new Date().toISOString(),
+      model: uid || responseModelUid || 'official', providerId: 'official', effort: null,
       status, code, httpStatus: httpStatus || 0, firstResponseMs: firstResponse, firstOutputMs: firstOutput, firstTextMs: firstText,
-      durationMs: Math.max(0, now() - start),
+      durationMs,
       outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
-      inputTokens: usage?.inputTokens ?? null, outputTokens, cachedTokens: usage?.cachedTokens ?? null, reasoningTokens,
-      visibleTokens: outputTokens !== null && (!hasReasoning || reasoningTokens !== null) ? outputTokens - (reasoningTokens ?? 0) : null,
-      decodeMs: firstText !== null && terminalAt !== null && terminalAt > firstText ? terminalAt - firstText : null,
+      inputTokens, outputTokens, cachedTokens, cacheWriteTokens, reasoningTokens,
+      tps, decodeMs, visibleTokens, throughputTps, usageComplete,
       hasTools, hasReasoning, toolIds: [...toolIds].slice(-32), messageIds: [] };
     try { onFinish?.(record); } catch { /* 统计失败不影响转发。 */ }
     return record;

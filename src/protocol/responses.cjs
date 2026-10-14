@@ -149,7 +149,7 @@ function processor(id, uid, chat, emit) {
     }
     const delta = complete ? value.slice(previous.length) : value;
     texts.set(key, complete ? value : previous + value);
-    if (delta) await emit(thinking ? thinkingChunk(id, delta) : textChunk(id, delta));
+    if (delta) await emit(thinking ? thinkingChunk(id, delta) : textChunk(id, delta), thinking);
   };
   const item = async (value, index, done) => {
     if (value.type === 'function_call') {
