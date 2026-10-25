@@ -525,7 +525,6 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
           sessionUpdate: 'user_message', messageId: clientMessageId, content: [{ type: 'text', text: label }],
           _meta: {
             'cognition.ai/clientMessageId': clientMessageId,
-            'cognition.ai/isOptimistic': true,
             'cognition.ai/timestamp': timestamp
           }
         }
@@ -538,7 +537,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
           sessionUpdate: 'user_message_chunk', content: { type: 'text', text: label },
           _meta: {
             'cognition.ai/clientMessageId': clientMessageId,
-            'cognition.ai/isOptimistic': true,
+            'cognition.ai/messageSubIndex': 0,
             'cognition.ai/timestamp': timestamp
           }
         }

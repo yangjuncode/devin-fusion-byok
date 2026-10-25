@@ -194,7 +194,6 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
             content: [{ type: 'text', text: 'continue' }],
             _meta: {
               'cognition.ai/clientMessageId': clientMessageId,
-              'cognition.ai/isOptimistic': true,
               'cognition.ai/timestamp': timestamp
             }
           }
@@ -208,7 +207,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
             content: { type: 'text', text: 'continue' },
             _meta: {
               'cognition.ai/clientMessageId': clientMessageId,
-              'cognition.ai/isOptimistic': true,
+              'cognition.ai/messageSubIndex': 0,
               'cognition.ai/timestamp': timestamp
             }
           }

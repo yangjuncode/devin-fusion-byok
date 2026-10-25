@@ -164,7 +164,8 @@ test('auto continue handles v1 fail -> continue -> success with backoff and synt
   const optimisticMsg = clientMessages.find(m => m.params?.update?.sessionUpdate === 'user_message_chunk');
   assert.ok(optimisticMsg);
   assert.equal(optimisticMsg.params.update.content.text, 'continue');
-  assert.equal(optimisticMsg.params.update._meta['cognition.ai/isOptimistic'], true);
+  assert.equal(optimisticMsg.params.update._meta['cognition.ai/isOptimistic'], undefined);
+  assert.equal(optimisticMsg.params.update._meta['cognition.ai/messageSubIndex'], 0);
 
   connector.forwardClientRequest({
     method: 'session/update',
