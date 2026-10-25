@@ -32,7 +32,7 @@ function createGoalController({
   root, transport, isEnabled = () => true, isTrusted = () => true,
   reportCliPath, execPath = process.execPath,
   scheduler = {}, now = Date.now, owner = crypto.randomBytes(16).toString('hex'),
-  log = () => {}, nextRunDelayMs = NEXT_RUN_DELAY_MS
+  log = () => {}, nextRunDelayMs = NEXT_RUN_DELAY_MS, defaultMaxRuns
 } = {}) {
   if (typeof root !== 'string' || !path.isAbsolute(root)) throw new TypeError('root must be an absolute path');
   if (!transport || typeof transport.dispatch !== 'function' || typeof transport.cancel !== 'function') {
@@ -118,6 +118,10 @@ function createGoalController({
   function statusOfSession(sessionId) {
     try { return sessionStatus(transport.sessionStatus ? transport.sessionStatus(sessionId) : 'unknown'); }
     catch { return 'unknown'; }
+  }
+  function effectiveDefaultMaxRuns() {
+    const raw = typeof defaultMaxRuns === 'function' ? defaultMaxRuns() : defaultMaxRuns;
+    return store.normalizeMaxRuns(raw) ?? store.DEFAULT_MAX_RUNS;
   }
   function requireOwnership(record) {
     const ownership = ownershipOf(record.sessionId);
@@ -431,7 +435,7 @@ function createGoalController({
     const record = {
       schemaVersion: store.SCHEMA_VERSION, id: crypto.randomBytes(16).toString('hex'), sessionId: clean,
       revision: 1, objective: objectiveText, criteria: objectiveText, status: 'active', runsStarted: 0,
-      maxRuns: store.DEFAULT_MAX_RUNS, activeRun: null, reason: null, evidence: [], missingRuns: 0,
+      maxRuns: effectiveDefaultMaxRuns(), activeRun: null, reason: null, evidence: [], missingRuns: 0,
       retryPolicy: store.normalizeRetryPolicy(undefined), retryWindow: null,
       lastEvidence: null, repeatCount: 0, createdAt: timestamp, updatedAt: timestamp, archivedAt: null
     };
@@ -451,7 +455,7 @@ function createGoalController({
     if (current.status === 'active') throw goalError('already-active', '目标已经在运行。');
     if (current.status === 'completed') throw goalError('completed', '目标已经完成。');
     if (current.runsStarted >= current.maxRuns) {
-      current.maxRuns = Math.min(store.MAX_RUNS, current.runsStarted + store.DEFAULT_MAX_RUNS);
+      current.maxRuns = Math.min(store.MAX_RUNS, current.runsStarted + effectiveDefaultMaxRuns());
       if (current.runsStarted >= current.maxRuns) throw goalError('exhausted', '已达最多 ' + store.MAX_RUNS + ' 次运行，不能继续。');
     }
     cancelTimer(current.id);
@@ -598,7 +602,7 @@ function createGoalController({
       if (!objectiveText) throw goalError('invalid-objective', '目标描述必须是 1 到 ' + store.MAX_OBJECTIVE_LENGTH + ' 字符的文本。');
       const criteriaText = store.normalizeCriteria(criteria);
       if (!criteriaText) throw goalError('invalid-criteria', '验收标准必须是 1 到 ' + store.MAX_CRITERIA_LENGTH + ' 字符的文本。');
-      const runs = store.normalizeMaxRuns(maxRuns);
+      const runs = maxRuns === undefined || maxRuns === null ? effectiveDefaultMaxRuns() : store.normalizeMaxRuns(maxRuns);
       if (runs === null) throw goalError('invalid-max-runs', '运行上限必须是 1 到 ' + store.MAX_RUNS + ' 的整数。');
       if (statusOfSession(clean) !== 'idle') throw goalError('session-unavailable', '只能对已观察为空闲的会话启动目标。');
       startable(clean);
@@ -667,6 +671,19 @@ function createGoalController({
       mirror(current.sessionId, true);
       report('goal-resumed', { stale: acquired.stale === true });
       return dispatch(readById(current.id) || current);
+    },
+    setMaxRuns({ id, maxRuns } = {}) {
+      const found = goalOf(id);
+      if (found.archivedAt !== null) throw goalError('archived', '已归档的目标不能修改运行上限。');
+      if (found.status === 'completed') throw goalError('completed', '已完成的目标不能修改运行上限。');
+      const record = goalOfOwned(id);
+      const requested = maxRuns === undefined || maxRuns === null ? null : store.normalizeMaxRuns(maxRuns);
+      if (requested === null) throw goalError('invalid-max-runs', '运行上限必须是 1 到 ' + store.MAX_RUNS + ' 的整数。');
+      if (requested <= record.runsStarted) throw goalError('invalid-max-runs', '新的运行上限必须大于已派发的 ' + record.runsStarted + ' 次。');
+      record.maxRuns = requested;
+      if (!persist(record)) throw goalError('store-write-failed', '目标状态写入失败。');
+      report('goal-max-runs-updated', { maxRuns: requested });
+      return readById(record.id) || record;
     },
     suspend({ reason = 'suspended' } = {}) {
       let paused = 0;

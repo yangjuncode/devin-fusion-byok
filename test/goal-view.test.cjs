@@ -90,16 +90,59 @@ test('the goal webview surfaces errors, review is labelled as not complete, and 
   const heads = collect(byId('goals'), node => node.className === 'goalhead').map(node => node.textContent);
   assert.ok(heads[0].includes('待验收'));
   assert.ok(heads[0].includes('不等于已完成'));
-  const counters = collect(byId('goals'), node => node.className === 'meta').map(node => node.textContent);
-  assert.ok(counters[0].includes('2 / 5'));
-  assert.ok(counters[0].includes('运行额度已使用'));
-  assert.ok(counters[0].includes('含派发准备，非模型回复数'));
+  const metas = collect(byId('goals'), node => node.className === 'meta');
+  const maxInput = collect(metas[0], node => typeof node.getAttribute === 'function' && node.getAttribute('data-maxruns'))[0];
+  assert.equal(maxInput.value, '5');
+  const metaText = metas[0].children.map(child => typeof child === 'string' ? child : child.textContent || '').join('');
+  assert.ok(metaText.includes('运行额度已使用 2 / '));
+  assert.ok(metaText.includes('含派发准备，非模型回复数'));
   receive({ data: { type: 'goal-result', id: 'x', ok: false, error: '该会话已有进行中的目标。' } });
   assert.equal(byId('error').textContent, '该会话已有进行中的目标。');
   const accept = collect(byId('goals'), node => node.tag === 'button' && node.textContent === '验收完成')[0];
   assert.ok(accept);
   accept.onclick();
   assert.ok(posts.some(message => message.type === 'goal.accept'));
+});
+
+test('editing the run limit in a goal card posts goal.setMaxRuns with the new value', () => {
+  const { byId, posts, receive } = webview();
+  receive({ data: { type: 'goal-state', state: state() } });
+  const input = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-maxruns'))[0];
+  assert.ok(input);
+  assert.equal(input.value, '5');
+  input.value = '20';
+  input.onchange();
+  const posted = posts.find(post => post.type === 'goal.setMaxRuns');
+  assert.equal(posted.payload.id, 'a'.repeat(32));
+  assert.equal(posted.payload.maxRuns, 20);
+});
+
+test('invalid or non-raising run limit edits reset the input without posting', () => {
+  const { byId, posts, receive } = webview();
+  const data = state();
+  data.goals[0].status = 'active';
+  receive({ data: { type: 'goal-state', state: data } });
+  const input = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-maxruns'))[0];
+  for (const bad of ['abc', '0', '101', '2', '', '5']) {
+    input.value = bad;
+    input.onchange();
+    assert.equal(input.value, '5', bad);
+  }
+  assert.ok(!posts.some(post => post.type === 'goal.setMaxRuns'));
+});
+
+test('locked, archived and completed goals render the limit as plain text', () => {
+  const { byId, receive } = webview();
+  const data = state();
+  data.goals = [
+    { ...data.goals[0], id: 'b'.repeat(32), locked: true },
+    { ...data.goals[0], id: 'c'.repeat(32), archived: true },
+    { ...data.goals[0], id: 'd'.repeat(32), status: 'completed' }
+  ];
+  receive({ data: { type: 'goal-state', state: data } });
+  assert.equal(collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-maxruns')).length, 0);
+  const texts = collect(byId('goals'), node => node.className === 'meta').map(node => node.textContent).join('\n');
+  assert.equal((texts.match(/2 \/ 5/g) || []).length, 3);
 });
 
 test('the goal webview shows untrusted and disabled states from the host snapshot', () => {
@@ -171,6 +214,7 @@ function host({ confirmAnswer = '确认', snapshot = state(), limitAnswer = unde
     start: payload => { calls.push(['start', payload]); return {}; },
     pause: payload => { calls.push(['pause', payload]); return {}; },
     resume: payload => { calls.push(['resume', payload]); return {}; },
+    setMaxRuns: payload => { calls.push(['setMaxRuns', payload]); return {}; },
     accept: payload => { calls.push(['accept', payload]); return {}; },
     archive: payload => { calls.push(['archive', payload]); return {}; }
   };
@@ -201,13 +245,15 @@ test('the host handles ready and refresh, answering with an id-less state post',
   h.handle.dispose();
 });
 
-test('the host dispatches start, pause, resume and archive to the controller', async () => {
+test('the host dispatches start, pause, resume, setMaxRuns and archive to the controller', async () => {
   const h = host();
   await h.receive({ type: 'goal.start', id: '1', payload: { sessionId: 's', objective: 'o', criteria: 'c' } });
   await h.receive({ type: 'goal.pause', id: '2', payload: { id: 'g' } });
   await h.receive({ type: 'goal.resume', id: '3', payload: { id: 'g' } });
-  await h.receive({ type: 'goal.archive', id: '4', payload: { id: 'g' } });
-  assert.deepEqual(h.calls.map(call => call[0]), ['start', 'pause', 'resume', 'archive']);
+  await h.receive({ type: 'goal.setMaxRuns', id: '4', payload: { id: 'g', maxRuns: 30 } });
+  await h.receive({ type: 'goal.archive', id: '5', payload: { id: 'g' } });
+  assert.deepEqual(h.calls.map(call => call[0]), ['start', 'pause', 'resume', 'setMaxRuns', 'archive']);
+  assert.deepEqual(h.calls.find(call => call[0] === 'setMaxRuns')[1], { id: 'g', maxRuns: 30 });
   assert.ok(h.posts.some(message => message.type === 'goal-result' && message.ok === true));
   h.handle.dispose();
 });

@@ -536,3 +536,16 @@ test('officially paired and standalone unlocked natives are offered and accepted
     assert.equal(publicState(fixture(), '', disabled).nativeModels.find(entry => entry.uid === 'swe-odd').eligible, false);
   });
 });
+
+test('setGoalDefaultMaxRuns persists the value and validates bounds', async () => {
+  const f = memory();
+  let state = await f.manager.dispatch('ready');
+  assert.equal(state.goalDefaultMaxRuns, 10);
+  state = await f.manager.dispatch('setGoalDefaultMaxRuns', { count: 30 });
+  assert.equal(state.goalDefaultMaxRuns, 30);
+  assert.equal(f.read().goalDefaultMaxRuns, 30);
+  await assert.rejects(f.manager.dispatch('setGoalDefaultMaxRuns', { count: 0 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setGoalDefaultMaxRuns', { count: 101 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setGoalDefaultMaxRuns', { count: 5.5 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setGoalDefaultMaxRuns', { count: '30' }), PanelInputError);
+});

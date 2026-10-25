@@ -502,6 +502,26 @@ function panelClient(modelSupportsImages, vscode) {
           element('span', { class: 'hint', text: '上游返回临时错误（408/429/5xx、超时或断流）时由本地服务直接重发请求，不向会话发送 continue 文本；间隔按 1,1,2,2,3,3,5,5,8,8,13,13,21,21 秒递增，之后固定 30 秒。仅在尚未输出正文或工具调用时生效（仅推理输出不阻止重试），默认 20 次，填 0 关闭。重试耗尽后仍可按上方开关发送 continue 兜底。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
+          type: 'number',
+          class: 'retry-count',
+          min: '1',
+          max: '100',
+          step: '1',
+          value: String(state.goalDefaultMaxRuns ?? 10),
+          disabled: state.enabled === false,
+          'aria-label': '目标默认运行上限',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const count = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setGoalDefaultMaxRuns', { count }), '正在保存目标默认上限…')
+              .then(ok => { if (!ok) event.target.value = String(state.goalDefaultMaxRuns ?? 10); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '目标默认运行上限' }),
+          element('span', { class: 'hint', text: '通过 /goal 启动目标时使用的默认运行轮数，范围 1-100，默认 10。只影响之后启动的目标；已在运行的目标可在 Goal 面板中单独调整上限。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
           type: 'checkbox',
           checked: state.autoContinueUntilPlanComplete === true,
           disabled: state.enabled === false,

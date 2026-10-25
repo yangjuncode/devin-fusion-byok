@@ -192,6 +192,7 @@ async function activate(context) {
         isEnabled: () => !activationDisposed && config().enabled !== false,
         isTrusted: () => vscode.workspace.isTrusted !== false,
         reportCliPath: path.join(context.extensionPath, 'src/runtime/goal-report.cjs'),
+        defaultMaxRuns: () => config().goalDefaultMaxRuns,
         log
       });
     } catch { goalController = undefined; log('goal-controller-unavailable'); }
@@ -473,6 +474,7 @@ async function activate(context) {
         start: payload => goalController.start(payload),
         pause: payload => goalController.pause(payload),
         resume: payload => goalController.resume(payload),
+        setMaxRuns: payload => goalController.setMaxRuns(payload),
         accept: payload => goalController.accept(payload),
         archive: payload => goalController.archive(payload)
       },

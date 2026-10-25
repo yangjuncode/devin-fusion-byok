@@ -647,3 +647,62 @@ test('report command quotes paths safely and carries no other goal secret', asyn
   assert.match(prompt, /--capability '[a-f0-9]{64}'/);
   assert.match(prompt, /'{"status":"progress","evidence":"[^"]*"}'/);
 });
+test('the configured default maxRuns applies to goals started via /goal', async t => {
+  const h = harness(t, { defaultMaxRuns: () => 42 });
+  h.sessions.set('session-1', 'idle');
+  const result = h.controller.handleCommand({ sessionId: 'session-1', action: 'start', text: 'finish the feature', connected: true });
+  await tick();
+  assert.ok(result.prompt);
+  assert.equal(h.goal().maxRuns, 42);
+});
+
+test('an invalid configured default maxRuns falls back to the built-in default', async t => {
+  for (const value of [undefined, 0, 101, 'x']) {
+    const h = harness(t, { defaultMaxRuns: () => value });
+    h.sessions.set('session-1', 'idle');
+    h.controller.handleCommand({ sessionId: 'session-1', action: 'start', text: 'finish the feature', connected: true });
+    await tick();
+    assert.equal(h.goal().maxRuns, store.DEFAULT_MAX_RUNS, String(value));
+    h.controller.dispose();
+  }
+});
+
+test('setMaxRuns raises the limit of a running goal in place', async t => {
+  const h = await started(t, { maxRuns: 3 });
+  const updated = h.controller.setMaxRuns({ id: h.goal().id, maxRuns: 50 });
+  assert.equal(updated.maxRuns, 50);
+  assert.equal(h.goal().status, 'active');
+  assert.equal(h.goal().maxRuns, 50);
+  assert.ok(h.logs.some(entry => entry.event === 'goal-max-runs-updated'));
+});
+
+test('a raised limit on a running goal takes effect at the next checkpoint', async t => {
+  const h = await started(t, { maxRuns: 1 });
+  const run = activeRun(h);
+  h.controller.setMaxRuns({ id: h.goal().id, maxRuns: 5 });
+  h.report(h.tokenOf(), { status: 'progress', evidence: 'one' });
+  h.emit({ sessionId: 'session-1', type: 'idle', runId: run, stopReason: 'end_turn' });
+  h.scheduler.advance(1500);
+  await tick();
+  assert.equal(h.goal().status, 'active');
+  assert.equal(h.goal().runsStarted, 2);
+});
+
+test('setMaxRuns validates bounds and requires more than the dispatched count', async t => {
+  const h = await started(t, { maxRuns: 5 });
+  const goal = h.goal();
+  assert.throws(() => h.controller.setMaxRuns({ id: goal.id, maxRuns: 1 }), /必须大于/);
+  assert.throws(() => h.controller.setMaxRuns({ id: goal.id, maxRuns: 0 }), /运行上限/);
+  assert.throws(() => h.controller.setMaxRuns({ id: goal.id, maxRuns: 101 }), /运行上限/);
+  assert.throws(() => h.controller.setMaxRuns({ id: goal.id }), /运行上限/);
+  assert.throws(() => h.controller.setMaxRuns({ id: 'a'.repeat(32), maxRuns: 50 }), /不存在/);
+  assert.equal(h.goal().maxRuns, 5);
+});
+
+test('setMaxRuns refuses archived goals', async t => {
+  const h = await started(t, { maxRuns: 5 });
+  const goal = h.goal();
+  h.controller.pause({ id: goal.id });
+  h.controller.archive({ id: goal.id });
+  assert.throws(() => h.controller.setMaxRuns({ id: goal.id, maxRuns: 50 }), /归档/);
+});

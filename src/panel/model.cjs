@@ -87,6 +87,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
     autoContinueMaxAttempts: Number.isSafeInteger(config.autoContinueMaxAttempts) && config.autoContinueMaxAttempts >= 0 && config.autoContinueMaxAttempts <= 100 ? config.autoContinueMaxAttempts : 30,
     upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
+    goalDefaultMaxRuns: Number.isSafeInteger(config.goalDefaultMaxRuns) && config.goalDefaultMaxRuns >= 1 && config.goalDefaultMaxRuns <= 100 ? config.goalDefaultMaxRuns : 10,
     autoByok: config.autoByok === true,
     nativeModelFilter: typeof config.nativeModelFilter === 'string' ? config.nativeModelFilter : DEFAULT_NATIVE_MODEL_FILTER,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
@@ -294,6 +295,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         const count = payload.count;
         if (!Number.isSafeInteger(count) || count < 0 || count > 100) fail('重试次数必须是 0 到 100 之间的整数。');
         config.upstreamRetries = count;
+        break;
+      }
+      case 'setGoalDefaultMaxRuns': {
+        const count = payload.count;
+        if (!Number.isSafeInteger(count) || count < 1 || count > 100) fail('目标默认运行上限必须是 1 到 100 之间的整数。');
+        config.goalDefaultMaxRuns = count;
         break;
       }
       default: fail('不支持的操作。');
