@@ -27,6 +27,9 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
     return target.webview.postMessage({ type: 'state', state });
   };
   const publish = () => panel ? postState(panel, manager.state()) : undefined;
+  const publishPicker = () => panel ? panel.webview.postMessage({ type: 'picker-state', state: (() => {
+    const state = manager.state(); return { homeModels: state.homeModels, homeCustomized: state.homeCustomized, homeDefaults: state.homeDefaults, homeCandidates: state.homeCandidates, nativePicker: state.nativePicker };
+  })() }) : undefined;
   function open() {
     if (disposed) return;
     if (panel) { panel.reveal(); void publish(); return; }
@@ -39,6 +42,14 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;
       if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
       try {
+        if (message.type === 'picker.reload') {
+          // The native React storage provider has no external state subscription.
+          // Reload only after the explicitly labelled panel action is clicked.
+          await manager.dispatch('normalizePickerModels');
+          await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          return;
+        }
         const state = await manager.dispatch(message.type, message.payload);
         await postState(current, state);
         await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
@@ -54,6 +65,6 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
     const closing = panel.onDidDispose(() => { clearInterval(timer); messages.dispose(); closing.dispose(); if (panel === current) panel = undefined; });
   }
   context.subscriptions.push({ dispose() { disposed = true; panel?.dispose(); } });
-  return { open, publish };
+  return { open, publish, publishPicker };
 }
 module.exports = { createPanelController };

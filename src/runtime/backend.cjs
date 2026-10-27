@@ -3,6 +3,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { networkIdentity } = require('./backend-env.cjs');
 const { readConfig } = require('../config.cjs');
 const { buildCatalog, resolveAssignment } = require('../catalog.cjs');
 const wire = require('../protocol/wire.cjs');
@@ -54,15 +55,16 @@ function autoByokRoute(current, chat) {
   return { uid: chat.modelUid, providerId: found.provider.id, model: found.model.id,
     effort: normId(found.model.id) === uid ? undefined : effort, maxOutputTokens };
 }
-const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
+const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'backend-env.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-choices.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
 function sourceId() {
   const hash = crypto.createHash('sha256');
   for (const name of SOURCE_FILES) hash.update(name).update('\0').update(fs.readFileSync(path.resolve(__dirname, name))).update('\0');
   return hash.digest('hex');
 }
 const LOADED_SOURCE_ID = sourceId();
-function runtimeIdentity(root, freshSource = false) {
+function runtimeIdentity(root, freshSource = false, env = process.env) {
   return { service: SERVICE, version: VERSION, sourceId: freshSource ? sourceId() : LOADED_SOURCE_ID,
+    networkId: networkIdentity(env),
     rootId: crypto.createHash('sha256').update(path.resolve(root)).digest('hex') };
 }
 function controlFile(root) { return path.join(root, 'runtime-control.json'); }

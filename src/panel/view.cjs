@@ -66,6 +66,9 @@ function renderPanel({ nonce, cspSource }) {
     .endpoint { margin: 3px 0 5px; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
     .toolbar .search { flex: 1 1 180px; min-width: 110px; }
+    .toolbar select { flex: 1 1 200px; width: auto; min-width: 0; }
+    .mb { margin-bottom: 10px; }
+    .model-sub { display: block; color: var(--vscode-descriptionForeground, #999); font-size: 12px; overflow-wrap: anywhere; }
     .model-list { border: 1px solid var(--vscode-panel-border, #454545); border-radius: 4px; max-height: 420px; overflow: auto; }
     .model-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; min-height: 52px; }
     .model-row + .model-row { border-top: 1px solid var(--vscode-panel-border, #454545); }
@@ -164,6 +167,10 @@ function renderPanel({ nonce, cspSource }) {
       <summary class="card-head"><h2 id="native-heading">官方模型</h2><span class="head-meta"><span id="native-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
       <div id="native-models" class="card-content"></div>
     </details>
+    <details id="home-card" class="card fusion-card" aria-labelledby="home-heading">
+      <summary class="card-head"><h2 id="home-heading">选择器第一页</h2><span class="head-meta"><span id="home-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
+      <div id="home-models" class="card-content"></div>
+    </details>
     <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
     ${monitorMarkup()}
   </main>
@@ -260,6 +267,8 @@ function panelClient(modelSupportsImages, vscode) {
     }
   }
 
+  const off = () => state?.enabled === false;
+
   function currentProvider() {
     return state?.providers?.find(provider => provider.id === providerId);
   }
@@ -291,6 +300,7 @@ function panelClient(modelSupportsImages, vscode) {
     renderModels();
     renderFusion();
     renderNative();
+    renderHome();
     if (busy) {
       for (const node of document.querySelectorAll('main button, main input, main select')) {
         node.dataset.wasDisabled = String(node.disabled);
@@ -676,6 +686,84 @@ function panelClient(modelSupportsImages, vscode) {
     }
   }
 
+  const HOME_KINDS = { fusion: '我的 Fusion', model: 'BYOK 模型', 'official-fusion': '官方 Fusion', official: '官方模型', unknown: '暂不可用' };
+  function renderHome() {
+    const container = byId('home-models');
+    container.replaceChildren();
+    const customized = state.homeCustomized === true;
+    const chosen = customized ? state.homeModels : state.homeDefaults || [], candidates = state.homeCandidates || [];
+    const picker = state.nativePicker || {}, connected = picker.status === 'ready';
+    byId('home-count').textContent = '自选 ' + chosen.length + ' · 置顶 ' + (picker.pinned || []).length + ' · 最近 ' + (picker.recent || []).length;
+    const save = uids => run(() => request('setHomeModels', { uids }), '正在保存首页…', '已保存，应用到聊天菜单后生效。');
+    const uids = chosen.map(item => item.uid);
+    const move = (index, delta) => { const next = [...uids]; const [item] = next.splice(index, 1); next.splice(index + delta, 0, item); return save(next); };
+    container.append(element('p', { class: 'hint mb', text: '第一页由首页 Fusion、Pinned（置顶）、Recently Used（最近使用）和首页其他模型组成。每个模型只列一次，思考档位在原生模型菜单内切换。灰色项也能移除、排序；账号权限保持原样。' }),
+      element('div', { class: 'toolbar' }, button('同步当前第一页', () => run(() => request('refreshPicker'), '正在读取 Devin 当前列表…', '已同步当前列表。')),
+        element('span', { class: 'hint', text: connected ? '已连接原生列表 · 自动同步' : picker.status === 'unavailable' ? '原生列表暂不可用，请同步重试' : '正在连接原生列表；首次升级请重新加载一次窗口' })),
+      element('h3', { text: customized ? '首页自选模型' : '首页自选模型（默认）' }));
+    if (chosen.length) {
+      const list = element('div', { class: 'model-list mb', 'aria-label': '首页模型' });
+      chosen.forEach((item, index) => list.append(element('div', { class: 'model-row' },
+        element('div', { class: 'model-text' }, element('span', { class: 'model-title', text: item.label }),
+          element('span', { class: 'model-sub', text: HOME_KINDS[item.kind] + (item.disabled ? ' · 账号不可用（灰色项）' : item.available ? '' : ' · 当前目录中不存在') })),
+        element('div', { class: 'actions' },
+          element('button', { type: 'button', class: 'quiet', text: '上移', disabled: index === 0 || off(), 'aria-label': '上移 ' + item.label, onclick: () => move(index, -1) }),
+          element('button', { type: 'button', class: 'quiet', text: '下移', disabled: index === chosen.length - 1 || off(), 'aria-label': '下移 ' + item.label, onclick: () => move(index, 1) }),
+          element('button', { type: 'button', class: 'quiet', text: '移除', disabled: off(), 'aria-label': '移除 ' + item.label, onclick: () => save(uids.filter(uid => uid !== item.uid)) })))));
+      container.append(list);
+    }
+    if (customized && !chosen.length) container.append(element('p', { class: 'hint', text: '首页自选当前为空。置顶和最近使用独立保留；其他模型仍可搜索。' }));
+    const select = element('select', { 'aria-label': '选择要加到首页的模型', disabled: off() });
+    const remaining = candidates.filter(item => !uids.includes(item.uid));
+    for (const kind of ['fusion', 'official-fusion', 'model', 'official']) {
+      const items = remaining.filter(item => item.kind === kind);
+      if (!items.length) continue;
+      const group = element('optgroup', { label: HOME_KINDS[kind] });
+      for (const item of items) { const option = element('option', { text: item.label + (item.disabled ? '（账号不可用）' : '') }); option.value = item.uid; group.append(option); }
+      select.append(group);
+    }
+    const add = button('添加到首页', () => select.value && save([...uids, select.value]), '');
+    add.disabled = !remaining.length || uids.length >= 50 || off();
+    const reset = button('恢复默认', () => run(() => request('resetHomeModels'), '正在恢复默认首页…', '已恢复默认，应用到聊天菜单后生效。'));
+    reset.disabled = !customized || off();
+    container.append(element('div', { class: 'toolbar' }, select, add, reset));
+    for (const [kind, title] of [['pinned', 'Pinned（置顶，含灰色项）'], ['recent', 'Recently Used（最近使用）']]) {
+      const rows = picker[kind] || [], ids = rows.flatMap(item => item.uids || [item.uid]);
+      const saveNative = next => run(() => request('setPickerList', { kind, uids: next, revision: picker.revision }),
+        '正在保存 Devin 原生列表…', '已保存，点击应用到聊天菜单后生效。');
+      container.append(element('h3', { text: title }));
+      const list = element('div', { class: 'model-list mb', 'aria-label': title });
+      if (!rows.length) list.append(element('div', { class: 'empty', text: connected ? '当前为空。' : '等待同步原生列表。' }));
+      rows.forEach((item, index) => {
+        const moveNative = delta => { const next = [...rows]; const [row] = next.splice(index, 1); next.splice(index + delta, 0, row); return saveNative(next.flatMap(item => item.uids || [item.uid])); };
+        const status = item.hidden ? '已在官方列表中隐藏' : item.kind === 'unknown' ? '已失效的保存记录，原生菜单不显示' : item.disabled ? '账号不可用（灰色项，可编辑显示）' : HOME_KINDS[item.kind];
+        list.append(element('div', { class: 'model-row' },
+          element('div', { class: 'model-text' }, element('span', { class: 'model-title', text: item.kind === 'unknown' ? '已失效模型' : item.label }),
+            element('span', { class: 'model-sub', text: status })),
+          element('div', { class: 'actions' },
+            element('button', { type: 'button', class: 'quiet', text: '上移', disabled: !connected || index === 0 || off(), 'aria-label': '上移' + kind + ' ' + item.label, onclick: () => moveNative(-1) }),
+            element('button', { type: 'button', class: 'quiet', text: '下移', disabled: !connected || index === rows.length - 1 || off(), 'aria-label': '下移' + kind + ' ' + item.label, onclick: () => moveNative(1) }),
+            element('button', { type: 'button', class: 'quiet', text: '移除', disabled: !connected || off(), 'aria-label': '移除' + kind + ' ' + item.label, onclick: () => saveNative(ids.filter(uid => !(item.uids || [item.uid]).includes(uid))) }))));
+      });
+      container.append(list);
+      if (kind === 'pinned') {
+        const pinSelect = element('select', { 'aria-label': '选择要置顶的模型', disabled: !connected || off() });
+        const remainingPins = candidates.filter(item => !rows.some(row => row.uid === item.uid));
+        for (const item of remainingPins) { const option = element('option', { text: item.label + (item.disabled ? '（账号不可用）' : '') }); option.value = item.uid; pinSelect.append(option); }
+        const pinAdd = button('添加到置顶', () => pinSelect.value && saveNative([...ids, pinSelect.value]));
+        pinAdd.disabled = !connected || !remainingPins.length || off();
+        container.append(element('div', { class: 'toolbar' }, pinSelect, pinAdd));
+      }
+      const clear = button('清空' + (kind === 'pinned' ? '置顶' : '最近使用'), () => saveNative([]));
+      clear.disabled = !connected || !rows.length || off(); container.append(clear);
+    }
+    const apply = button('应用到聊天菜单（刷新当前窗口）', () => run(() => request('picker.reload'), '正在刷新当前窗口…', '正在重新加载当前窗口。'));
+    apply.disabled = off();
+    container.append(element('div', { class: 'toolbar' }, apply),
+      element('p', { class: 'hint', text: (picker.needsReload ? '列表已保存。' : '') + '应用时会合并同一 BYOK 模型的重复档位置顶，保留最前面的档位。原生菜单需要重新加载当前窗口才会重读数据；刷新可能中断本窗口正在进行的对话。最近使用还会随着后续选模型自动变化。' }));
+    if (!candidates.some(item => item.kind.startsWith('official'))) container.append(element('p', { class: 'hint', text: '还没收到官方模型列表，打开一次 Devin 的模型选择器后，官方模型就会出现在这里。' }));
+  }
+
   function openDialog(title) {
     const dialog = byId('editor-dialog');
     if (dialog.open) dialog.close();
@@ -778,17 +866,46 @@ function panelClient(modelSupportsImages, vscode) {
     const name = input(preset?.name || '', { required: true, maxlength: 80, placeholder: '例如：日常开发、深入排查' });
     form.append(element('label', { class: 'field' }, element('span', { class: 'field-title', text: '预设名称' }), name));
     const selections = {};
+    const key = ref => JSON.stringify([ref?.nativeUid || '', ref?.providerId || '', ref?.model || '', ref?.effort ?? null]);
+    let missing = false;
     for (const role of ['lead', 'sidekick']) {
-      const candidates = [...(state.presetCandidates?.[role] || [])];
-      const key = ref => JSON.stringify([ref?.nativeUid || '', ref?.providerId || '', ref?.model || '', ref?.effort ?? null]);
-      if (preset?.[role] && !candidates.some(item => key(item.ref) === key(preset[role]))) candidates.push({ ref: preset[role], label: '当前不可用：' + (preset[role].nativeUid || preset[role].model), unavailable: true });
-      const select = element('select', { required: true, 'aria-label': role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' });
-      select.append(element('option', { value: '', text: '请选择模型与档位' }));
+      const candidates = (state.presetCandidates?.[role] || []).map(item => ({ ...item, variants: [...(item.variants || [{ ref: item.ref, label: '默认' }])] }));
+      if (!candidates.length) missing = true;
+      if (preset?.[role] && !candidates.some(item => item.variants.some(variant => key(variant.ref) === key(preset[role])))) {
+        const ref = preset[role];
+        const family = candidates.find(item => ref.nativeUid ? item.ref.nativeUid === ref.nativeUid : !item.ref.nativeUid && item.ref.providerId === ref.providerId && item.ref.model === ref.model);
+        const variant = { ref, label: '当前不可用：' + (ref.effort || '默认'), unavailable: true };
+        if (family) family.variants.push(variant);
+        else candidates.push({ ref, label: '当前不可用：' + (ref.nativeUid || ref.model), unavailable: true, variants: [variant] });
+      }
+      const title = role === 'lead' ? 'Lead 模型' : 'Sidekick 模型';
+      const select = element('select', { required: true, 'aria-label': title });
+      const effort = element('select', { 'aria-label': role === 'lead' ? 'Lead 思考档位' : 'Sidekick 思考档位' });
+      const effortField = field('思考档位', effort);
+      const savedEfforts = new Map();
+      const refreshEffort = () => {
+        const candidate = select.value === '' ? null : candidates[Number(select.value)];
+        effort.replaceChildren();
+        (candidate?.variants || []).forEach((variant, index) => effort.append(element('option', { value: String(index), text: variant.label, disabled: variant.unavailable === true })));
+        const saved = savedEfforts.get(select.value);
+        if (saved !== undefined) effort.value = saved;
+        else if (preset?.[role]) {
+          const index = (candidate?.variants || []).findIndex(variant => key(variant.ref) === key(preset[role]));
+          if (index >= 0) effort.value = String(index);
+        }
+        effortField.hidden = !candidate || !!candidate.ref.nativeUid || candidate.variants.length === 1 && candidate.variants[0].ref.effort == null;
+        effort.disabled = candidate?.unavailable === true || candidate?.variants.length === 1;
+      };
+      select.addEventListener('change', refreshEffort);
+      effort.addEventListener('change', () => savedEfforts.set(select.value, effort.value));
+      select.append(element('option', { value: '', text: '请选择' }));
       candidates.forEach((item, index) => select.append(element('option', { value: String(index), text: (item.ref.nativeUid ? '官方 · ' : '') + item.label, disabled: item.unavailable === true })));
-      if (preset?.[role]) select.value = String(candidates.findIndex(item => key(item.ref) === key(preset[role])));
-      form.append(element('label', { class: 'field' }, element('span', { class: 'field-title', text: role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' }), select));
-      selections[role] = () => select.value === '' ? null : candidates[Number(select.value)]?.ref;
+      if (preset?.[role]) select.value = String(candidates.findIndex(item => item.variants.some(variant => key(variant.ref) === key(preset[role]))));
+      refreshEffort();
+      form.append(field(title, select), effortField);
+      selections[role] = () => select.value === '' ? null : candidates[Number(select.value)]?.variants[Number(effort.value)]?.ref;
     }
+    if (missing) form.append(element('p', { class: 'hint', text: '下拉框是空的？先在「导入的模型」里导入并启用模型。' }));
     finishDialog(dialog, form, '保存预设', () => request('saveFusionPreset', {
       ...(preset ? { id: preset.id } : {}), name: name.value, lead: selections.lead(), sidekick: selections.sidekick(),
     }));
@@ -892,6 +1009,9 @@ function panelClient(modelSupportsImages, vscode) {
       state = message.state;
       render(previousState);
       if (initial) { byId('main').setAttribute('aria-busy', 'false'); notice(''); }
+    } else if (message.type === 'picker-state' && state && message.state) {
+      Object.assign(state, message.state);
+      if (!busy) renderHome();
     } else if (message.type === 'result') {
       const operation = pending.get(message.id);
       if (!operation) return;
