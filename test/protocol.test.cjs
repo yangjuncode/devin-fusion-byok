@@ -531,14 +531,31 @@ test('retry exhaustion still surfaces the provider error', async t => {
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.attempts === 2));
 });
 
-test('terminal HTTP error is not retried', async t => {
-  let calls = 0;
-  const app = await bridge(t, async (req, res) => { calls++; res.writeHead(400); res.end(); },
-    'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
-  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
-  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 400.');
-  assert.equal(calls, 1);
-  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
+test('non-transient HTTP errors (400/404) are retried up to 3 times before stopping', async t => {
+  for (const status of [400, 404]) await t.test(`HTTP ${status} exhausted after 3 retries`, async st => {
+    let calls = 0;
+    const app = await bridge(st, async (req, res) => { calls++; res.writeHead(status); res.end(); },
+      'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+    const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+    assert.equal(result.messages.map(message => str(message, 3)).join(''), `Provider returned HTTP ${status}.`);
+    assert.equal(calls, 4);
+    assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.status === status).length, 3);
+    assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === status && l.attempts === 3));
+  });
+  await t.test('HTTP 404 recovers within 3 retries', async st => {
+    let calls = 0;
+    const app = await bridge(st, async (req, res) => {
+      calls++;
+      if (calls <= 3) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(event({ type: 'response.output_text.delta', delta: 'Recovered from 404' }) +
+        event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+    }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
+    const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+    assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Recovered from 404');
+    assert.equal(calls, 4);
+    assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.status === 404).length, 3);
+  });
 });
 
 test('mid-stream failure after emitted output is retried on a fresh message id', async t => {
@@ -616,7 +633,7 @@ test('mid-stream error event status surfaces provider HTTP error text', async t 
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 502));
 });
 
-test('stream error event with terminal code is not retried', async t => {
+test('stream error event with non-transient code retries up to 3 times', async t => {
   let calls = 0;
   const app = await bridge(t, async (req, res) => {
     calls++;
@@ -625,12 +642,12 @@ test('stream error event with terminal code is not retried', async t => {
   }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
   const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 400.');
-  assert.equal(calls, 1);
-  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
-  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 400));
+  assert.equal(calls, 4);
+  assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.status === 400).length, 3);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_http' && l.status === 400 && l.attempts === 3));
 });
 
-test('response.failed error details contribute upstream status', async t => {
+test('response.failed error details contribute upstream status and cap retries at 3', async t => {
   let calls = 0;
   const app = await bridge(t, async (req, res) => {
     calls++;
@@ -639,8 +656,8 @@ test('response.failed error details contribute upstream status', async t => {
   }, 'openai-responses', {}, () => {}, {}, { retries: 5, retryDelayMs: 1 });
   const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider returned HTTP 401.');
-  assert.equal(calls, 1);
-  assert.equal(app.logs.some(l => l.event === 'chat-retry'), false);
+  assert.equal(calls, 4);
+  assert.equal(app.logs.filter(l => l.event === 'chat-retry' && l.status === 401).length, 3);
 });
 
 test('flat error event rate limit code retries transparently as HTTP 429', async t => {

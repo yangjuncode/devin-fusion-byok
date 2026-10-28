@@ -267,9 +267,11 @@ function processor(id, uid, chat, emit) {
   };
 }
 
-// 上游临时错误的可重试判定：与 auto-continue 的 TRANSIENT_HTTP_RE 口径一致，
-// 4xx 中只有 408/429 值得重试，其余视为确定性失败。
+// 上游错误的可重试判定：408/429/5xx 临时错误按完整的 maxRetries 上限重试；
+// 其余 4xx/5xx（如 400/404 等网关偶发路由或节点抖动）最多重试 NON_TRANSIENT_HTTP_MAX_RETRIES 次，
+// 避免偶发一次 404/400 就直接中断。
 const RETRYABLE_HTTP_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const NON_TRANSIENT_HTTP_MAX_RETRIES = 3;
 // 网关把上游失败塞进 SSE error 事件时，HTTP 状态常被替换成字符串错误码
 // （CLIProxyAPI 的 upstream_error、OpenAI 的 rate_limit_exceeded 等）。
 // 数字字段直接采信，字符串错误码映射回代表性状态，让流内错误与真实
@@ -375,8 +377,14 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
   // 已向客户端输出内容后无法原样重发（会拼接重复输出），但流式阶段只可能
   // 输出过文本/思考片段——工具调用只在 finish 时整块发出，断流重发永远不会
   // 重复执行工具。因此已输出时也可重试：旧消息以 13 终止，换新 id 重来。
-  const canRetry = () => classifiedCode === 'upstream_http'
-    ? RETRYABLE_HTTP_STATUS.has(status) : RETRYABLE_CODES.has(classifiedCode);
+  const retryLimit = () => {
+    if (classifiedCode === 'upstream_http') {
+      if (RETRYABLE_HTTP_STATUS.has(status)) return maxRetries;
+      if (status >= 400 && status <= 599) return Math.min(maxRetries, NON_TRANSIENT_HTTP_MAX_RETRIES);
+      return 0;
+    }
+    return RETRYABLE_CODES.has(classifiedCode) ? maxRetries : 0;
+  };
 
   const emitCancelled = () => {
     outcome = 'cancelled';
@@ -513,7 +521,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       } catch (err) {
         clearTimer();
         if (signal?.aborted || res.destroyed || res.writableEnded) return emitCancelled();
-        if (attempts < maxRetries && canRetry()) {
+        if (attempts < retryLimit()) {
           attempts++;
           upstreamController.abort();
           const delay = fixedRetryWait ?? retryBackoffMs(attempts);
