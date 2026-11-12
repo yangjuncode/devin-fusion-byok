@@ -257,7 +257,6 @@ test('observeChat taps forwarded chat streams without altering request or respon
   assert.equal(records[0].status, 'success');
   assert.equal(records[0].id, 'm1');
   assert.equal(records[0].hasTools, true);
-  assert.deepEqual(records[0].toolIds, ['call-7']);
 });
 
 test('observeChat ignores non-chat RPCs and survives observer failures', async t => {

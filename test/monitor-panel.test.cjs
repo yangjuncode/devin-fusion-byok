@@ -15,12 +15,11 @@ test('monitor browser script compiles, uses text nodes, and preserves zero versu
   }
   const elements = new Map();
   const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  byId('monitor-session').value = 'all';
   let receive;
   vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} }, setInterval: () => 0 });
-  const record = { id: 'id', startedAt: 'now', model: '<img onerror=alert(1)>', status: 'success', inputTokens: 0, outputTokens: null, usageComplete: false, attribution: 'unassigned' };
-  const timed = { id: 'id2', startedAt: '2026-09-24T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
-  receive({ data: { type: 'monitor-state', result: { snapshot: { summary: { requests: 2, success: 2, error: 0, cancelled: 0 }, records: [record, timed], sessions: [], sessionStatus: 'ready' } } } });
+  const record = { id: 'id', startedAt: 'now', model: '<img onerror=alert(1)>', status: 'success', inputTokens: 0, outputTokens: null, usageComplete: false };
+  const timed = { id: 'id2', startedAt: '2026-09-24T00:00:00.000Z', model: 'm', status: 'success' };
+  receive({ data: { type: 'monitor-state', result: { snapshot: { summary: { requests: 2, success: 2, error: 0, cancelled: 0 }, records: [record, timed] } } } });
   const cells = byId('monitor-requests').children[0].children;
   assert.equal(cells[0].textContent, 'now', '无法解析的时间原样显示');
   const timedCells = byId('monitor-requests').children[1].children;
@@ -31,6 +30,7 @@ test('monitor browser script compiles, uses text nodes, and preserves zero versu
   assert.equal(cells[4].textContent, '未提供'); assert.equal(cells[5].textContent, '未提供');
   const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
   assert.match(html, /用量与性能/); assert.match(html, /connect-src 'none'/);
+  assert.ok(!html.includes('monitor-session') && !html.includes('会话关联'), '面板不再提供会话筛选与归属列');
   new vm.Script(html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1]);
 });
 test('usage monitor renders as the last section of the panel', () => {
@@ -51,14 +51,13 @@ test('monitor time range filters records and collapsible sections default collap
   }
   const elements = new Map();
   const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  byId('monitor-session').value = 'all';
   byId('monitor-range').value = '1h';
   let receive;
   vm.runInNewContext(monitorScript(), { document: { getElementById: byId, createElement: () => new Element() }, window: { addEventListener: (_, fn) => { receive = fn; } }, vscode: { postMessage() {} }, setInterval: () => 0 });
-  const fresh = { id: 'fresh', startedAt: new Date().toISOString(), model: 'm', status: 'success', attribution: 'unassigned' };
-  const stale = { id: 'stale', startedAt: '2020-01-01T00:00:00.000Z', model: 'm', status: 'success', attribution: 'unassigned' };
-  const unparseable = { id: 'odd', startedAt: 'now', model: 'm', status: 'success', attribution: 'unassigned' };
-  receive({ data: { type: 'monitor-state', result: { snapshot: { records: [fresh, stale, unparseable], sessions: [], sessionStatus: 'ready' } } } });
+  const fresh = { id: 'fresh', startedAt: new Date().toISOString(), model: 'm', status: 'success' };
+  const stale = { id: 'stale', startedAt: '2020-01-01T00:00:00.000Z', model: 'm', status: 'success' };
+  const unparseable = { id: 'odd', startedAt: 'now', model: 'm', status: 'success' };
+  receive({ data: { type: 'monitor-state', result: { snapshot: { records: [fresh, stale, unparseable] } } } });
   assert.equal(byId('monitor-requests').children.length, 2, '时间范围外的记录被过滤，时间无法解析的记录仍显示');
   byId('monitor-range').value = 'all';
   byId('monitor-range').listeners.change();
@@ -82,7 +81,6 @@ test('monitor shows a disconnect notice when monitor-state messages stop arrivin
   }
   const elements = new Map();
   const byId = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  byId('monitor-session').value = 'all';
   let receive, tick, now = 1000000;
   class FakeDate extends Date { static now() { return now; } }
   vm.runInNewContext(monitorScript(), {

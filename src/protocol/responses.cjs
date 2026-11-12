@@ -325,7 +325,7 @@ function retryBackoffMs(attempt) {
 
 async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {}, retries = 0, retryDelayMs = null, onMetrics = () => {} }) {
   const id = randomUUID();
-  let metrics = createTracker({ id, request, route, provider });
+  let metrics = createTracker({ id, route, provider });
   let outcome = 'error', outcomeCode = null;
   let upstreamController = new AbortController();
   const abort = () => upstreamController.abort();
@@ -423,7 +423,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       if (signal?.aborted) upstreamController.abort();
       status = 0;
       classifiedCode = 'upstream_network';
-      metrics = createTracker({ id, request, route, provider });
+      metrics = createTracker({ id, route, provider });
       try {
         armTimer(firstResponseLimit, 'upstream_timeout');
         const upstream = await fetch(url, {

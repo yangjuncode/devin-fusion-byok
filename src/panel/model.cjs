@@ -82,6 +82,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
   const eligibleSidekicks = new Set(roleLists.sidekick.filter(item => item.available).map(item => item.ref.nativeUid).filter(Boolean));
   const observed = new Set();
   const natives = [];
+  const monitorDays = Number(config.monitorRetentionDays);
   for (const entry of nativeModels) {
     if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
     observed.add(entry.uid);
@@ -117,6 +118,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     autoContinueMaxAttempts: Number.isSafeInteger(config.autoContinueMaxAttempts) && config.autoContinueMaxAttempts >= 0 && config.autoContinueMaxAttempts <= 100 ? config.autoContinueMaxAttempts : 30,
     upstreamRetries: Number.isSafeInteger(config.upstreamRetries) && config.upstreamRetries >= 0 && config.upstreamRetries <= 100 ? config.upstreamRetries : 20,
     goalDefaultMaxRuns: Number.isSafeInteger(config.goalDefaultMaxRuns) && config.goalDefaultMaxRuns >= 1 && config.goalDefaultMaxRuns <= 100 ? config.goalDefaultMaxRuns : 10,
+    monitorRetentionDays: Number.isFinite(monitorDays) && monitorDays > 0 ? monitorDays : 7,
     autoByok: config.autoByok === true,
     nativeModelFilter: typeof config.nativeModelFilter === 'string' ? config.nativeModelFilter : DEFAULT_NATIVE_MODEL_FILTER,
     ...homeState(catalog, natives, picker),
@@ -364,6 +366,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         const count = payload.count;
         if (!Number.isSafeInteger(count) || count < 1 || count > 100) fail('目标默认运行上限必须是 1 到 100 之间的整数。');
         config.goalDefaultMaxRuns = count;
+        break;
+      }
+      case 'setMonitorRetentionDays': {
+        const days = payload.days;
+        if (!Number.isSafeInteger(days) || days < 1 || days > 365) fail('监控数据保留天数必须是 1 到 365 之间的整数。');
+        config.monitorRetentionDays = days;
         break;
       }
       default: fail('不支持的操作。');

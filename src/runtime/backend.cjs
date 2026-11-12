@@ -73,10 +73,13 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
   const identity = runtimeIdentity(root);
   const instanceId = crypto.randomUUID();
   const controlToken = crypto.randomBytes(32).toString('hex');
+  const configFile = path.join(root, 'config.json');
+  const config = () => readConfig(configFile);
   let monitor, createNativeTracker;
   try {
     const mod = require('./monitor.cjs');
-    monitor = mod.createMonitor({ root });
+    // 传函数而非静态值：面板改动 monitorRetentionDays 后下次快照即按新值裁剪，无需重启后端。
+    monitor = mod.createMonitor({ root, retentionDays: () => { try { return config().monitorRetentionDays; } catch { return undefined; } } });
     createNativeTracker = mod.createNativeTracker;
   } catch { log('monitor-unavailable'); }
   const recordMetrics = data => {
@@ -88,8 +91,6 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
   let closing;
   let resolveStopped;
   const stopped = new Promise(resolve => { resolveStopped = resolve; });
-  const configFile = path.join(root, 'config.json');
-  const config = () => readConfig(configFile);
   const observedNatives = new Map();
   // 与 /_runtime/native-models 输出契约一致的严格校验；不合格条目直接丢弃，
   // 防止损坏的本地快照或异常上报污染资格判定。

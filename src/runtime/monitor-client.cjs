@@ -9,7 +9,7 @@ const METRIC_FIELDS = ['value', 'reported', 'samples'];
 const RECORD_FIELDS = ['schemaVersion', 'id', 'startedAt', 'model', 'providerId', 'effort', 'status', 'code', 'httpStatus',
   'inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens', 'firstOutputMs', 'firstTextMs', 'firstResponseMs',
   'durationMs', 'outputSpanMs', 'tps', 'decodeMs', 'visibleTokens', 'hasTools', 'hasReasoning',
-  'throughputTps', 'gatewayTps', 'usageState', 'usageComplete', 'sessionId', 'attribution', 'role'];
+  'throughputTps', 'gatewayTps', 'usageState', 'usageComplete'];
 async function readMonitor({ root, port = PORT, signal, request = fetch }) {
   const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000);
   const base = 'http://127.0.0.1:' + port;
@@ -67,22 +67,13 @@ function recordOf(entry) {
   for (const field of RECORD_FIELDS) if (entry[field] !== undefined) record[field] = entry[field];
   return record;
 }
-function sessionOf(entry) {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-  const summary = summaryOf(entry.summary);
-  if (!summary || !Array.isArray(entry.records)) return null;
-  return { sessionId: typeof entry.sessionId === 'string' ? entry.sessionId : null,
-    attribution: typeof entry.attribution === 'string' ? entry.attribution : 'unassigned',
-    summary, records: entry.records.map(recordOf).filter(Boolean) };
-}
 function publicSnapshot(snapshot) {
   const summary = summaryOf(snapshot.summary);
-  if (snapshot.version !== 1 || typeof snapshot.status !== 'string' || !summary || !Array.isArray(snapshot.records) || !Array.isArray(snapshot.sessions)) {
+  if (snapshot.version !== 1 || typeof snapshot.status !== 'string' || !summary || !Array.isArray(snapshot.records)) {
     throw new Error('monitor_invalid');
   }
   return { version: 1, status: snapshot.status, storageError: snapshot.storageError === true,
-    sessionStatus: snapshot.sessionStatus === 'ready' ? 'ready' : 'unavailable',
-    records: snapshot.records.map(recordOf).filter(Boolean), summary,
-    sessions: snapshot.sessions.map(sessionOf).filter(Boolean) };
+    revision: typeof snapshot.revision === 'string' || typeof snapshot.revision === 'number' ? snapshot.revision : undefined,
+    records: snapshot.records.map(recordOf).filter(Boolean), summary };
 }
 module.exports = { readMonitor, postMonitorRecord, MAX_SNAPSHOT_BYTES, publicSnapshot };

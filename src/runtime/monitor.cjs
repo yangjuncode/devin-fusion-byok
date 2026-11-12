@@ -1,10 +1,8 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { execFile } = require('node:child_process');
 const wire = require('../protocol/wire.cjs');
 const LIMIT = 5000;
 const token = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -41,12 +39,10 @@ function semanticOutput(event, chat) {
     items.some(item => item?.type === 'function_call' && (item.name || item.arguments));
   return { output: Boolean(text || delta || tool), text: Boolean(text) };
 }
-function createTracker({ id, request, route, provider, now = () => performance.now(), startedAt = new Date().toISOString() }) {
+function createTracker({ id, route, provider, now = () => performance.now(), startedAt = new Date().toISOString() }) {
   const start = now();
   let firstOutput = null, firstText = null, firstResponse = null, lastOutput = null, usage = null, complete = false;
   let hasTools = false, hasReasoning = false, terminalAt = null;
-  const toolIds = new Set();
-  const rememberTool = id => { if (identifier(id)) toolIds.add(id); };
   return {
     event(event, chat) {
       const elapsed = now() - start;
@@ -57,8 +53,6 @@ function createTracker({ id, request, route, provider, now = () => performance.n
       const delta = choice?.delta;
       const items = chat ? [] : data?.response?.output || (data?.item ? [data.item] : []);
       if (delta?.tool_calls?.length || items.some(item => item?.type === 'function_call') || event.type?.startsWith('response.function_call_arguments.')) hasTools = true;
-      for (const call of delta?.tool_calls || []) rememberTool(call.id);
-      for (const item of items) if (item?.type === 'function_call') rememberTool(item.call_id || item.id);
       if (delta?.reasoning_content || delta?.reasoning || event.type?.startsWith('response.reasoning')) hasReasoning = true;
       if (choice?.finish_reason || ['response.completed', 'response.incomplete'].includes(event.type)) terminalAt ??= elapsed;
       const semantic = semanticOutput(event, chat);
@@ -85,9 +79,7 @@ function createTracker({ id, request, route, provider, now = () => performance.n
         outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
         tps, decodeMs, visibleTokens, hasTools, hasReasoning,
         throughputTps: status === 'success' && complete && durationMs > 0 ? usage.outputTokens * 1000 / durationMs : null,
-        toolIds: [...toolIds].slice(-32),
-        usageComplete: complete, messageIds: [...new Set((request.messages || []).map(m => identifier(m.messageId)).filter(Boolean))].slice(-8),
-        sessionId: null, attribution: 'unassigned', role: 'unknown' };
+        usageComplete: complete };
     }
   };
 }
@@ -95,13 +87,10 @@ function normalize(record) {
   if (!identifier(record?.id) || !['success', 'error', 'cancelled'].includes(record.status) || !Number.isFinite(Date.parse(record.startedAt))) return null;
   const result = { id: record.id, startedAt: record.startedAt, model: identifier(record.model) || 'unknown',
     providerId: identifier(record.providerId) || '', effort: identifier(record.effort), status: record.status,
-    code: identifier(record.code), httpStatus: token(record.httpStatus) ?? 0, usageComplete: record.usageComplete === true,
-    messageIds: Array.isArray(record.messageIds) ? [...new Set(record.messageIds.map(identifier).filter(Boolean))].slice(-8) : [],
-    sessionId: null, attribution: 'unassigned', role: 'unknown' };
+    code: identifier(record.code), httpStatus: token(record.httpStatus) ?? 0 };
   for (const key of ['inputTokens', 'outputTokens', 'cachedTokens', 'cacheWriteTokens', 'reasoningTokens']) result[key] = token(record[key]);
   for (const key of ['firstOutputMs', 'firstTextMs', 'durationMs', 'outputSpanMs']) result[key] = timing(record[key]);
   result.schemaVersion = [2, 3].includes(record.schemaVersion) ? record.schemaVersion : 1;
-  result.toolIds = result.schemaVersion >= 2 && Array.isArray(record.toolIds) ? [...new Set(record.toolIds.map(identifier).filter(Boolean))].slice(-32) : [];
   result.hasTools = result.schemaVersion >= 2 ? record.hasTools === true : null;
   result.hasReasoning = result.schemaVersion >= 2 ? record.hasReasoning === true : null;
   result.decodeMs = result.schemaVersion >= 2 ? timing(record.decodeMs) : null;
@@ -159,7 +148,6 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
   let hasTools = false, hasReasoning = false, finished = false;
   let metaUsage = null;
   let topLevelOutputTokens = null;
-  const toolIds = new Set();
 
   let uid = identifier(modelUid) || '';
   if (!uid && requestBody) {
@@ -192,7 +180,6 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
       else if (field.number === 9 && field.value.length) { hasReasoning = true; firstOutput ??= elapsed; lastOutput = elapsed; }
       else if (field.number === 6) {
         hasTools = true; firstOutput ??= elapsed; lastOutput = elapsed;
-        try { const tid = identifier(wire.str(field.value, 1)); if (tid) toolIds.add(tid); } catch {}
       } else if (field.number === 20 || field.number === 23) {
         responseModelUid = identifier(field.value.toString('utf8')) || responseModelUid;
       } else if (field.number === 7) {
@@ -281,127 +268,80 @@ function createNativeTracker({ requestHeaders, requestBody, upstream, modelUid =
       outputSpanMs: firstOutput !== null && lastOutput > firstOutput ? lastOutput - firstOutput : null,
       inputTokens, outputTokens, cachedTokens, cacheWriteTokens, reasoningTokens,
       tps, decodeMs, visibleTokens, throughputTps, usageComplete,
-      hasTools, hasReasoning, toolIds: [...toolIds].slice(-32), messageIds: [] };
+      hasTools, hasReasoning };
     try { onFinish?.(record); } catch { /* 统计失败不影响转发。 */ }
     return record;
   }
   return { data, finish };
 }
 
-const quote = value => "'" + value.replace(/'/g, "''") + "'";
-async function sessionMatches(databasePath, ids, toolIds = []) {
-  if (!ids.length && !toolIds.length) return [];
-  const values = ids.map(quote).join(',') || "''";
-  const tools = toolIds.map(quote).join(',') || "''";
-  const sql = `.timeout 1000\nSELECT DISTINCT session_id, json_extract(chat_message, '$.message_id') AS message_id, 'message' AS kind FROM message_nodes WHERE json_extract(chat_message, '$.message_id') IN (${values}) UNION SELECT session_id, tool_call_id AS message_id, 'tool' AS kind FROM tool_call_state WHERE tool_call_id IN (${tools});\n`;
-  return new Promise((resolve, reject) => {
-    const child = execFile('/usr/bin/sqlite3', ['-readonly', '-json', databasePath], { timeout: 8000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout) => {
-      if (error) { reject(new Error('session_lookup_unavailable')); return; }
-      try { resolve(JSON.parse(stdout || '[]')); } catch { reject(new Error('session_lookup_invalid')); }
-    });
-    child.stdin.on('error', () => {});
-    child.stdin.end(sql);
-  });
-}
-// ACP 内嵌会话（含 sidekick）的 transcript 不进 CLI sessions.db，而是每个会话
-// 一个 acp-messages/<uuid>.db；tool_call 行 payload.content.toolCallId 可能带
-// "sk::" 等命名空间前缀，按后缀匹配记录的 toolIds。
-const ACP_DB = /^[0-9a-f-]{36}\.db$/i;
-async function acpMatches(dir, toolIds) {
-  const wanted = [...new Set((toolIds || []).map(identifier).filter(Boolean))];
-  if (!wanted.length) return [];
-  let names;
-  try { names = await fs.promises.readdir(dir); } catch { return []; }
-  const rows = [];
-  await Promise.all(names.filter(name => ACP_DB.test(name)).map(name => new Promise(resolve => {
-    const sql = `.timeout 2000\nSELECT DISTINCT json_extract(payload,'$.content.toolCallId') AS tid FROM messages WHERE kind='tool_call';\n`;
-    const child = execFile('/usr/bin/sqlite3', ['-readonly', '-json', path.join(dir, name)], { timeout: 10000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      try {
-        const tids = JSON.parse(stdout || '[]').map(row => row.tid).filter(t => typeof t === 'string');
-        const sessionId = name.slice(0, -3);
-        for (const id of wanted) if (tids.some(tid => tid === id || tid.endsWith(id))) rows.push({ session_id: sessionId, message_id: id, kind: 'tool' });
-      } catch {}
-      resolve();
-    });
-    child.stdin.on('error', () => {});
-    child.stdin.end(sql);
-  })));
-  return rows;
-}
-function associate(records, rows) {
-  const mapping = new Map();
-  for (const row of rows) {
-    if (!identifier(row.message_id) || !identifier(row.session_id)) continue;
-    const key = (row.kind === 'tool' ? 'tool:' : 'message:') + row.message_id;
-    if (!mapping.has(key)) mapping.set(key, new Set());
-    mapping.get(key).add(row.session_id);
-  }
-  return records.map(record => {
-    let sessions = mapping.get('message:' + record.id), attribution = 'response-id';
-    if (!sessions?.size) {
-      attribution = 'tool-id';
-      sessions = new Set((record.toolIds || []).flatMap(id => [...(mapping.get('tool:' + id) || [])]));
-    }
-    const { messageIds, toolIds, ...publicRecord } = record;
-    return { ...publicRecord, sessionId: sessions?.size === 1 ? [...sessions][0] : null,
-      attribution: sessions?.size === 1 ? attribution : sessions?.size > 1 ? 'ambiguous' : 'unassigned' };
-  });
-}
-function createMonitor({ root, databasePath = path.join(os.homedir(), '.local/share/devin/cli/sessions.db'),
-  acpMessagesDir = path.resolve(root, '..', '..', 'acp-messages') } = {}) {
+// 会话归属查询已移除：sessions.db / acp-messages 的全表扫描在历史数据量大时
+// 会打满 CPU，且面板不再按会话筛选。记录统一记为未归属，用量统计不受影响。
+function createMonitor({ root, retentionDays } = {}) {
   const file = path.join(root, 'monitor.jsonl');
+  const instanceNonce = crypto.randomBytes(4).toString('hex');
+  // 历史保留期（天）：默认 7 天。retentionDays 可以是函数，快照时重新解析，
+  // 面板里改配置无需重启后端即生效；非法值回退默认。
+  const resolveDays = typeof retentionDays === 'function' ? retentionDays : () => retentionDays;
+  const normalizeDays = value => { const days = Number(value); return Number.isFinite(days) && days > 0 ? days : 7; };
+  let retentionDayCount = normalizeDays(resolveDays());
+  const rewriteAll = list => {
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    const temporary = file + '.tmp';
+    fs.writeFileSync(temporary, list.map(r => JSON.stringify(r)).join('\n') + (list.length ? '\n' : ''), { mode: 0o600 });
+    fs.chmodSync(temporary, 0o600);
+    fs.renameSync(temporary, file);
+  };
   let records = [], storageError = false, pending = null, cached = null, cachedAt = 0, revision = 0;
+  // 按当前保留期裁剪记录并重写文件；有记录被裁掉时递增 revision 使快照缓存失效。
+  const purgeExpired = () => {
+    const cutoff = Date.now() - retentionDayCount * 86400 * 1000;
+    const kept = records.filter(r => Date.parse(r.startedAt) >= cutoff);
+    if (kept.length === records.length) return;
+    records = kept; revision++;
+    try { rewriteAll(records); } catch { storageError = true; }
+  };
   try {
     if (fs.existsSync(file)) {
       if (fs.statSync(file).size > 32 * 1024 * 1024) throw new Error('monitor_size');
+      let dirty = false;
       for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
         if (!line) continue;
-        try { const record = normalize(JSON.parse(line)); if (record) records.push(record); else storageError = true; } catch { storageError = true; }
+        try { const record = normalize(JSON.parse(line)); if (record) records.push(record); else dirty = true; } catch { dirty = true; }
       }
       records = [...new Map(records.map(r => [r.id, r])).values()].slice(-LIMIT);
+      // 启动时按保留期裁剪历史并顺带清除无法解析的行，避免 monitor.jsonl 无限增长。
+      purgeExpired();
+      if (dirty) { try { rewriteAll(records); } catch { storageError = true; } }
     }
+    // 旧版本的会话归属缓存已随归属查询一并移除。
+    fs.rmSync(path.join(root, 'monitor-sessions.json'), { force: true });
   } catch { storageError = true; }
   function record(data) {
     const value = normalize(data);
     if (!value || records.some(r => r.id === value.id)) return;
     records.push(value); records = records.slice(-LIMIT); revision++;
     try {
-      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-      if (records.length === LIMIT) {
-        const temporary = file + '.tmp';
-        fs.writeFileSync(temporary, records.map(r => JSON.stringify(r)).join('\n') + '\n', { mode: 0o600 });
-        fs.renameSync(temporary, file);
-      } else fs.appendFileSync(file, JSON.stringify(value) + '\n', { mode: 0o600 });
+      if (records.length === LIMIT) rewriteAll(records);
+      else { fs.mkdirSync(root, { recursive: true, mode: 0o700 }); fs.appendFileSync(file, JSON.stringify(value) + '\n', { mode: 0o600 }); }
     } catch { storageError = true; }
   }
   async function snapshot() {
+    // 保留天数支持动态配置：每次快照重新解析，改动后自动裁剪并使缓存失效。
+    const days = normalizeDays(resolveDays());
+    if (days !== retentionDayCount) { retentionDayCount = days; purgeExpired(); }
     if (pending) return pending;
     if (cached && Date.now() - cachedAt < 15000 && cached.revision === revision) return cached.value;
     const current = records.slice(), currentRevision = revision;
     pending = (async () => {
-      let rows = [], sessionStatus = 'ready';
-      const toolIds = [...new Set(current.flatMap(r => r.toolIds || []))];
-      const [dbRows, acpRows] = await Promise.all([
-        sessionMatches(databasePath, current.map(r => r.id), toolIds).catch(() => { sessionStatus = 'unavailable'; return []; }),
-        acpMatches(acpMessagesDir, toolIds).catch(() => []),
-      ]);
-      rows = [...dbRows, ...acpRows];
-      const publicRecords = associate(current, rows).reverse();
-      const groups = new Map();
-      for (const r of publicRecords) {
-        const key = r.sessionId || '__unassigned__';
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(r);
-      }
-      const value = { version: 1, status: storageError || sessionStatus !== 'ready' ? 'degraded' : 'ready', storageError, sessionStatus,
-        retentionLimit: LIMIT, records: publicRecords, summary: summarize(publicRecords),
-        sessions: [...groups.values()].map(list => ({ sessionId: list[0].sessionId,
-          attribution: list.every(r => r.attribution === 'response-id') ? 'response-id' : list[0].sessionId ? 'tool-id' : 'unassigned',
-          summary: summarize(list), records: list })) };
+      const value = { version: 1, status: storageError ? 'degraded' : 'ready', storageError,
+        retentionLimit: LIMIT, retentionDays: retentionDayCount, revision: currentRevision + ':' + instanceNonce,
+        records: current.slice().reverse(), summary: null };
+      value.summary = summarize(value.records);
       cached = { revision: currentRevision, value }; cachedAt = Date.now(); return value;
     })().finally(() => { pending = null; });
     return pending;
   }
   return { record, snapshot, close() {} };
 }
-module.exports = { createMonitor, createTracker, createNativeTracker, usageOf, semanticOutput, summarize, associate };
+module.exports = { createMonitor, createTracker, createNativeTracker, usageOf, summarize };

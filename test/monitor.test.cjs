@@ -4,12 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const wire = require('../src/protocol/wire.cjs');
-const { createMonitor, createTracker, createNativeTracker, usageOf, associate, summarize } = require('../src/runtime/monitor.cjs');
+const { createMonitor, createTracker, createNativeTracker, usageOf, summarize } = require('../src/runtime/monitor.cjs');
 function tracker() {
   let clock = 0;
-  const value = createTracker({ id: 'response-1', request: { messages: [{ messageId: 'user-1', content: 'PRIVATE' }] }, route: { model: 'test' }, provider: { id: 'p', apiKey: 'SECRET' }, now: () => clock });
+  const value = createTracker({ id: 'response-1', route: { model: 'test' }, provider: { id: 'p', apiKey: 'SECRET' }, now: () => clock });
   return { value, at: n => { clock = n; } };
 }
 test('usage separates subset counters, zero and missing; never accumulates repeated usage', () => {
@@ -33,16 +32,6 @@ test('empty events do not count as output; tool-only and cancellation are explic
   assert.equal(record.firstOutputMs, 20); assert.equal(record.firstTextMs, null);
   assert.equal(record.tps, null); assert.equal(record.inputTokens, null); assert.equal(record.usageComplete, false);
 });
-test('exact response identity outranks shared history and ambiguity never chooses a session', () => {
-  const r = tracker().value.finish('success', 200);
-  const rows = [{ message_id: 'user-1', session_id: 'a' }, { message_id: 'user-1', session_id: 'b' }];
-  assert.equal(associate([r], rows)[0].attribution, 'unassigned');
-  assert.equal(associate([r], rows)[0].sessionId, null);
-  rows.push({ message_id: 'response-1', session_id: 'b' });
-  const result = associate([r], rows)[0];
-  assert.equal(result.sessionId, 'b'); assert.equal(result.attribution, 'response-id');
-  assert.equal(result.messageIds, undefined);
-});
 test('aggregate TPS is ratio of sums and unknown counts are not zeros', () => {
   const base = tracker().value.finish('success', 200);
   const summary = summarize([{ ...base, outputTokens: 10, durationMs: 1000, tps: 10 }, { ...base, outputTokens: 90, durationMs: 3000, tps: 30 }, { ...base, status: 'cancelled' }]);
@@ -59,11 +48,7 @@ test('DeepSeek cache alias, tool-bearing output, done-only text and failed sampl
   t.at(200); t.value.event({ type: 'response.output_item.added', data: { item: { type: 'function_call', call_id: 'tool-1', name: 'exec' } } }, false);
   t.at(1000); t.value.event({ type: 'response.completed', data: { response: { usage: { input_tokens: 20, output_tokens: 30 } } } }, false);
   const record = t.value.finish('success', 200);
-  assert.equal(record.tps, null); assert.deepEqual(record.toolIds, ['tool-1']); assert.equal(record.throughputTps, 30);
-  const assigned = associate([record], [{ message_id: 'tool-1', session_id: 'session-a', kind: 'tool' }])[0];
-  assert.equal(assigned.sessionId, 'session-a'); assert.equal(assigned.attribution, 'tool-id');
-  const ambiguous = associate([record], [{ message_id: 'tool-1', session_id: 'a', kind: 'tool' }, { message_id: 'tool-1', session_id: 'b', kind: 'tool' }])[0];
-  assert.equal(ambiguous.sessionId, null); assert.equal(ambiguous.attribution, 'ambiguous');
+  assert.equal(record.tps, null); assert.equal(record.throughputTps, 30);
   const doneOnly = tracker(); doneOnly.at(500);
   doneOnly.value.event({ type: 'response.completed', data: { response: { output: [{ type: 'message', content: [{ type: 'output_text', text: 'hello' }] }], usage: { output_tokens: 5 } } } }, false);
   assert.equal(doneOnly.value.finish('success', 200).tps, null);
@@ -81,7 +66,7 @@ test('gateway timing includes metadata, tools and canceled usage; snapshots repl
   tracked.at(200); tracked.value.event({ data: { choices: [{ delta: { tool_calls: [{ id: 'call-a', function: { name: 'exec', arguments: '{}' } }] } }], usage: { prompt_tokens: 100, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 80 } } } }, true);
   tracked.at(500); tracked.value.event({ data: { choices: [], usage: { prompt_tokens: 100, completion_tokens: 20 } } }, true);
   tracked.at(1100);
-  const monitor = createMonitor({ root, databasePath: path.join(root, 'missing.db') });
+  const monitor = createMonitor({ root });
   monitor.record(tracked.value.finish('cancelled', 200));
   const snapshot = await monitor.snapshot();
   const r = snapshot.records[0];
@@ -99,41 +84,65 @@ test('gateway timing includes metadata, tools and canceled usage; snapshots repl
   assert.equal(next.records.find(v => v.id === 'bad').gatewayTps, null);
 });
 
-test('persists private-safe records, resolves real SQLite IDs read-only and survives restart', async t => {
+test('persists private-safe records and survives restart without session lookup', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'byok-monitor-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const db = path.join(root, 'sessions.db');
-  execFileSync('/usr/bin/sqlite3', [db, "CREATE TABLE tool_call_state(session_id TEXT,tool_call_id TEXT); CREATE TABLE message_nodes(session_id TEXT,chat_message TEXT); INSERT INTO message_nodes VALUES('session-a','{\"message_id\":\"response-1\"}');"]);
-  const monitor = createMonitor({ root, databasePath: db });
+  const monitor = createMonitor({ root });
   const record = tracker().value.finish('success', 200);
   monitor.record({ ...record, secret: 'SECRET' }); monitor.record(record);
   const snapshot = await monitor.snapshot();
-  assert.equal(snapshot.records.length, 1); assert.equal(snapshot.sessions[0].sessionId, 'session-a');
-  assert.equal(snapshot.records[0].attribution, 'response-id');
+  assert.equal(snapshot.records.length, 1);
+  assert.equal(snapshot.records[0].id, 'response-1');
+  assert.ok(!('sessionId' in snapshot.records[0]) && !('attribution' in snapshot.records[0]));
   assert.ok(!JSON.stringify(snapshot).includes('messageIds'));
   const file = path.join(root, 'monitor.jsonl');
   assert.equal(fs.statSync(file).mode & 0o777, 0o600); assert.ok(!fs.readFileSync(file, 'utf8').includes('SECRET'));
-  assert.equal((await createMonitor({ root, databasePath: db }).snapshot()).records.length, 1);
-  const missing = await createMonitor({ root, databasePath: path.join(root, 'missing.db') }).snapshot();
-  assert.equal(missing.sessionStatus, 'unavailable'); assert.equal(missing.records[0].sessionId, null);
+  const restarted = await createMonitor({ root }).snapshot();
+  assert.equal(restarted.records.length, 1);
+  assert.equal(restarted.records[0].id, 'response-1');
 });
 
-test('acp transcript databases resolve namespaced tool call ids', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-monitor-test-'));
+test('startup retention drops records older than the configured window', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-monitor-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const db = path.join(root, 'sessions.db');
-  execFileSync('/usr/bin/sqlite3', [db, "CREATE TABLE tool_call_state(session_id TEXT,tool_call_id TEXT); CREATE TABLE message_nodes(session_id TEXT,chat_message TEXT);"]);
-  const acpDir = path.join(root, 'acp-messages');
-  fs.mkdirSync(acpDir);
-  const sessionDb = path.join(acpDir, '85679d72-69f5-4c79-b444-1e760facbd98.db');
-  execFileSync('/usr/bin/sqlite3', [sessionDb, "CREATE TABLE messages(position INTEGER PRIMARY KEY, kind TEXT, payload TEXT); INSERT INTO messages(kind,payload) VALUES('tool_call','{\"content\":{\"toolCallId\":\"sk::exec:0#abc123\"}}'),('agent_message','{\"unrelated\":true}');"]);
-  const monitor = createMonitor({ root, databasePath: db, acpMessagesDir: acpDir });
-  const record = tracker().value.finish('success', 200);
-  monitor.record({ ...record, id: 'bot-9', toolIds: ['exec:0#abc123'] });
+  const file = path.join(root, 'monitor.jsonl');
+  const old = { ...tracker().value.finish('success', 200), id: 'old-record', startedAt: new Date(Date.now() - 10 * 86400 * 1000).toISOString() };
+  const recent = { ...tracker().value.finish('success', 200), id: 'recent-record' };
+  fs.writeFileSync(file, [old, recent].map(r => JSON.stringify(r)).join('\n') + '\n', { mode: 0o600 });
+  const monitor = createMonitor({ root });
   const snapshot = await monitor.snapshot();
-  assert.equal(snapshot.sessionStatus, 'ready');
-  assert.equal(snapshot.records[0].sessionId, '85679d72-69f5-4c79-b444-1e760facbd98');
-  assert.equal(snapshot.records[0].attribution, 'tool-id');
+  assert.equal(snapshot.records.length, 1);
+  assert.equal(snapshot.records[0].id, 'recent-record');
+  assert.equal(snapshot.retentionDays, 7);
+  assert.deepEqual(fs.readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l).id), ['recent-record'],
+    'monitor.jsonl 被重写为仅保留窗口内记录');
+  // 自定义保留期：1 天窗口同样裁掉 10 天前的记录；非法值回退默认 7 天。
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-monitor-test-'));
+  t.after(() => fs.rmSync(root2, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root2, 'monitor.jsonl'), [old, recent].map(r => JSON.stringify(r)).join('\n') + '\n');
+  const custom = await createMonitor({ root: root2, retentionDays: 1 }).snapshot();
+  assert.equal(custom.retentionDays, 1);
+  assert.equal(custom.records.length, 1);
+  const root3 = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-monitor-test-'));
+  t.after(() => fs.rmSync(root3, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root3, 'monitor.jsonl'), JSON.stringify(old) + '\n');
+  const fallback = await createMonitor({ root: root3, retentionDays: 'forever' }).snapshot();
+  assert.equal(fallback.retentionDays, 7);
+  assert.equal(fallback.records.length, 0, '非法保留期按默认 7 天处理并清理');
+  // 动态保留期：getter 返回值变化后，下一次快照按新窗口裁剪并重写文件。
+  const root4 = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-monitor-test-'));
+  t.after(() => fs.rmSync(root4, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root4, 'monitor.jsonl'), [old, recent].map(r => JSON.stringify(r)).join('\n') + '\n');
+  let days = 30;
+  const dynamic = createMonitor({ root: root4, retentionDays: () => days });
+  assert.equal((await dynamic.snapshot()).records.length, 2, '30 天窗口保留两条');
+  days = 1;
+  const shrunk = await dynamic.snapshot();
+  assert.equal(shrunk.retentionDays, 1);
+  assert.equal(shrunk.records.length, 1);
+  assert.equal(shrunk.records[0].id, 'recent-record');
+  assert.deepEqual(fs.readFileSync(path.join(root4, 'monitor.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l).id), ['recent-record'],
+    '缩短保留期后文件同步重写');
 });
 
 test('native tracker parses forwarded chat frames and keeps the response message id', () => {
@@ -161,7 +170,6 @@ test('native tracker parses forwarded chat frames and keeps the response message
   assert.equal(result.providerId, 'official');
   assert.equal(result.status, 'success');
   assert.equal(result.hasTools, true);
-  assert.deepEqual(result.toolIds, ['call-1']);
   assert.equal(result.httpStatus, 200);
   // field 7 ModelUsageStats 解码回来：面板口径输入含缓存（input+cache_read）
   assert.equal(result.inputTokens, 165141);
@@ -219,7 +227,7 @@ test('native tracker parses official token usage (input, output, cache read/writ
   // Normalization through createMonitor
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'official-monitor-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const monitor = createMonitor({ root, databasePath: path.join(root, 'none.db') });
+  const monitor = createMonitor({ root });
   monitor.record(result);
   const snap = await monitor.snapshot();
   assert.equal(snap.records.length, 1);

@@ -532,6 +532,26 @@ function panelClient(modelSupportsImages, vscode) {
           element('span', { class: 'hint', text: '通过 /goal 启动目标时使用的默认运行轮数，范围 1-100，默认 10。只影响之后启动的目标；已在运行的目标可在 Goal 面板中单独调整上限。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
+          type: 'number',
+          class: 'retry-count',
+          min: '1',
+          max: '365',
+          step: '1',
+          value: String(state.monitorRetentionDays ?? 7),
+          disabled: state.enabled === false,
+          'aria-label': '监控数据保留天数',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const days = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setMonitorRetentionDays', { days }), '正在保存监控保留天数…')
+              .then(ok => { if (!ok) event.target.value = String(state.monitorRetentionDays ?? 7); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '监控数据保留天数' }),
+          element('span', { class: 'hint', text: '「用量与性能」面板的请求记录保留天数，范围 1-365，默认 7。后端启动时及保存配置后自动清理超过该天数的历史数据。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
           type: 'checkbox',
           checked: state.autoContinueUntilPlanComplete === true,
           disabled: state.enabled === false,

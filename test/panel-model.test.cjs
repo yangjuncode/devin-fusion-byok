@@ -551,6 +551,19 @@ test('setGoalDefaultMaxRuns persists the value and validates bounds', async () =
   await assert.rejects(f.manager.dispatch('setGoalDefaultMaxRuns', { count: '30' }), PanelInputError);
 });
 
+test('setMonitorRetentionDays persists the value and validates bounds', async () => {
+  const f = memory();
+  let state = await f.manager.dispatch('ready');
+  assert.equal(state.monitorRetentionDays, 7);
+  state = await f.manager.dispatch('setMonitorRetentionDays', { days: 3 });
+  assert.equal(state.monitorRetentionDays, 3);
+  assert.equal(f.read().monitorRetentionDays, 3);
+  await assert.rejects(f.manager.dispatch('setMonitorRetentionDays', { days: 0 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setMonitorRetentionDays', { days: 366 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setMonitorRetentionDays', { days: 1.5 }), PanelInputError);
+  await assert.rejects(f.manager.dispatch('setMonitorRetentionDays', { days: '3' }), PanelInputError);
+});
+
 test('first-page list keeps order, offers every own and visible official model, and clears to default', async () => {
   const observed = [{ uid: 'official-plain', label: 'Official Plain', disabled: false, isModelRouter: false },
     { uid: 'official-router', label: 'Official Router', disabled: false, isModelRouter: true },
