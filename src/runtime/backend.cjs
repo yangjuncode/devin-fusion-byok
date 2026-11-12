@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { networkIdentity } = require('./backend-env.cjs');
 const { readConfig } = require('../config.cjs');
 const { buildCatalog, resolveAssignment } = require('../catalog.cjs');
+const { capContextWindow, contextWindowCaps } = require('../model-capabilities.cjs');
 const wire = require('../protocol/wire.cjs');
 const { parseChat } = require('../protocol/chat.cjs');
 const { serveChat } = require('../protocol/responses.cjs');
@@ -48,7 +49,7 @@ function autoByokRoute(current, chat) {
     ?? providers.flatMap(provider => models(provider).map(model => ({ provider, model })))
       .find(({ model }) => baseId !== uid && normId(model.id) === baseId);
   if (!found) return undefined;
-  const contextWindow = Number.isSafeInteger(found.model.contextWindow) && found.model.contextWindow > 0 ? found.model.contextWindow : 272000;
+  const contextWindow = capContextWindow(found.model.id, Number.isSafeInteger(found.model.contextWindow) && found.model.contextWindow > 0 ? found.model.contextWindow : 272000, contextWindowCaps(current));
   const maxOutputTokens = Number.isSafeInteger(found.model.maxOutputTokens) && found.model.maxOutputTokens > 0
     ? Math.min(found.model.maxOutputTokens, contextWindow) : undefined;
   // 精确命中时 id 自带变体语义，effort 留空用供应商默认；后缀命中时透传请求档位。

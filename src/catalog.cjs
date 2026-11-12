@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const { parseFields, str, num, s, v, m } = require('./protocol/wire.cjs');
-const { modelEfforts, modelSupportsImages } = require('./model-capabilities.cjs');
+const { modelEfforts, modelSupportsImages, capContextWindow, contextWindowCap, contextWindowCaps } = require('./model-capabilities.cjs');
 const { modelChoices } = require('./model-choices.cjs');
 
 const OWN_GROUP = 'Devin Fusion BYOK';
@@ -523,6 +523,7 @@ function buildCatalog(config = {}, nativeModels = []) {
     throw new Error('Invalid inference server URL');
   }
   const providers = Array.isArray(config.providers) ? config.providers.filter(provider => provider && provider.enabled !== false) : [];
+  const caps = contextWindowCaps(config);
   const identities = new Set();
   for (const provider of providers) {
     if (typeof provider.id !== 'string' || !provider.id) throw new Error('Provider id is required');
@@ -538,7 +539,7 @@ function buildCatalog(config = {}, nativeModels = []) {
       for (const effort of efforts) {
         if (effort !== null && (typeof effort !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(effort))) throw new Error('Invalid effort value');
         const uid = `dfbyok-${slug(provider.id)}-${slug(model.id)}-${digest([provider.id, model.id, effort]).slice(0, 16)}`;
-        const contextWindow = positive(model.contextWindow, 272000);
+        const contextWindow = capContextWindow(model.id, positive(model.contextWindow, 272000), caps);
         const maxOutputTokens = Math.min(positive(model.maxOutputTokens, 16384), contextWindow);
         const lead = { uid, key, familyLabel, providerId: provider.id, model: model.id, effort,
           contextWindow, maxOutputTokens, supportsImages: modelSupportsImages(model), inferenceServerUrl };
@@ -625,8 +626,8 @@ function buildCatalog(config = {}, nativeModels = []) {
   const candidates = {
     lead: [...selectedImportedLeads.map(importedCandidate), ...selectedPresetNativeLeads.map(native => ({
       ...native, native: true, ref: { nativeUid: native.uid },
-      contextWindow: positive(native.maxTokens, 272000),
-      maxOutputTokens: Math.min(positive(native.maxOutputTokens, 16384), positive(native.maxTokens, 272000)),
+      contextWindow: capContextWindow(native.uid, positive(native.maxTokens, 272000), caps),
+      maxOutputTokens: Math.min(positive(native.maxOutputTokens, 16384), capContextWindow(native.uid, positive(native.maxTokens, 272000), caps)),
       inferenceServerUrl,
     }))],
     sidekick: [...leads.filter(lead => selectedSidekickKeys.has(refKey({ providerId: lead.providerId, model: lead.model }))).map(importedCandidate),
@@ -683,7 +684,7 @@ function buildCatalog(config = {}, nativeModels = []) {
       ...(lead.native ? { leadHarnessUids: lead.leadHarnessUids } : {}),
       ...(sidekick.native ? { sidekickHarnessUids: sidekick.harnessUids } : {}) };
   }
-  return { models: [...presetModels, ...models], routes, fusions, sidekicks, hiddenNativeModelUids, hiddenFusionUids,
+  return { models: [...presetModels, ...models], routes, fusions, sidekicks, hiddenNativeModelUids, hiddenFusionUids, contextWindowCaps: caps,
     nativeFilterTerms: nativeFilterTerms(config.nativeModelFilter),
     homeModelUids: normalizeHomeModels(config.homeModels), homeConfigured: has(config, 'homeModels'),
     presetStates, savedPresets, migratedFrom,
@@ -937,6 +938,61 @@ function defaultFusion(catalog) {
   return fusion?.sidekickNative === false && fusion?.leadNative !== true && has(catalog?.routes, fusion.leadUid) && has(catalog?.routes, fusion.sidekickUid) ? fusion : null;
 }
 
+// 官方透传条目同样按规则封顶后才返回：有效窗口取上报 maxTokens 与模型上限的
+// 较小值，外层 maxTokens(18) 与内嵌 modelInfo(23) 中的 maxTokens(4) 一律压到该值，
+// maxOutputTokens(13) 也不允许超过它，保持“输出 ≤ 窗口”不变式。
+function capProtoEntryTokens(entry, cap) {
+  const parsed = parseFields(entry);
+  let window = cap;
+  for (const field of parsed) {
+    if (field.number === 18 && field.wire === 0 && Number.isSafeInteger(field.value)) window = Math.min(window, field.value);
+    else if (field.number === 23 && field.wire === 2) {
+      for (const part of parseFields(field.value)) {
+        if (part.number === 4 && part.wire === 0 && Number.isSafeInteger(part.value)) window = Math.min(window, part.value);
+      }
+    }
+  }
+  let changed = false;
+  const parts = parsed.map(field => {
+    if (field.number === 18 && field.wire === 0 && field.value > window) { changed = true; return { raw: v(18, window) }; }
+    if (field.number === 23 && field.wire === 2) {
+      let innerChanged = false;
+      const inner = parseFields(field.value).map(part => {
+        if (part.wire === 0 && (part.number === 4 || part.number === 13) && part.value > window) {
+          innerChanged = true; return { raw: v(part.number, window) };
+        }
+        return part;
+      });
+      if (!innerChanged) return field;
+      changed = true;
+      return { raw: m(23, concat(inner.map(part => part.raw))) };
+    }
+    return field;
+  });
+  return changed ? concat(parts.map(part => part.raw)) : null;
+}
+
+function capJsonModelTokens(model, cap) {
+  if (!model || typeof model !== 'object' || Array.isArray(model)) return model;
+  const tokensKey = jsonKey(model, 'maxTokens', 'max_tokens'), top = model[tokensKey];
+  const infoKey = jsonKey(model, 'modelInfo', 'model_info'), info = model[infoKey];
+  const inner = info && typeof info === 'object' && !Array.isArray(info) ? info : null;
+  const maxKey = inner ? jsonKey(inner, 'maxTokens', 'max_tokens') : '', outKey = inner ? jsonKey(inner, 'maxOutputTokens', 'max_output_tokens') : '';
+  let window = cap;
+  if (Number.isSafeInteger(top)) window = Math.min(window, top);
+  if (inner && Number.isSafeInteger(inner[maxKey])) window = Math.min(window, inner[maxKey]);
+  if (!(top > window) && !(inner && (inner[maxKey] > window || inner[outKey] > window))) return model;
+  const next = { ...model };
+  if (top > window) next[tokensKey] = window;
+  if (inner) {
+    const nextInfo = { ...inner };
+    if (inner[maxKey] > window) nextInfo[maxKey] = window;
+    if (inner[outKey] > window) nextInfo[outKey] = window;
+    next[infoKey] = nextInfo;
+  }
+  return next;
+}
+
 function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNativeModels) {
   const models = Array.isArray(catalog.models) ? catalog.models : [];
   const parsed = parseFields(data), existingLabels = new Set(models.map(model => model.label));
@@ -955,6 +1011,9 @@ function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNati
       if (ownUid(uid)) { existingLabels.add(label); continue; }
       if (hiddenNative.has(uid) || hiddenFusion.has(uid) || matchesNativeFilter(uid, filterTerms)) { if (label) hiddenLabels.add(label); continue; }
       retainedLabels.add(label);
+      const capped = capProtoEntryTokens(field.value, contextWindowCap(uid, catalog.contextWindowCaps));
+      preserved.push(capped ? { raw: m(1, capped) } : field);
+      continue;
     }
     preserved.push(field);
   }
@@ -1020,7 +1079,7 @@ function augmentJsonList(data, catalog, hasSorts = true, onFusionStatus, onNativ
     if (ownUid(uid)) { existingLabels.add(model?.label); continue; }
     if (hiddenNative.has(uid) || hiddenFusion.has(uid) || matchesNativeFilter(uid, filterTerms)) { if (typeof model.label === 'string') hiddenLabels.add(model.label); continue; }
     if (typeof model?.label === 'string') retainedLabels.add(model.label);
-    kept.push(model);
+    kept.push(capJsonModelTokens(model, contextWindowCap(uid, catalog.contextWindowCaps)));
   }
   for (const label of hiddenLabels) if (retainedLabels.has(label)) hiddenLabels.delete(label);
   const home = homeGroups(catalog, nativeEntries(existing, true), hiddenLabels);
@@ -1045,8 +1104,10 @@ function augmentCatalog(data, { rpc, format = {}, catalog, onFusionStatus, onNat
   if (rpc === '/exa.seat_management_pb.SeatManagementService/GetCliTeamSettings') return augmentLocalModelChoices(data, format, catalog);
   const shape = rpcShape(rpc);
   if (!shape || !catalog) return data;
+  const caps = catalog.contextWindowCaps;
+  const capsActive = !!caps && (Number.isFinite(caps.gpt) || Number.isFinite(caps.other));
   if (!catalog.models?.length && !catalog.hiddenNativeModelUids?.length && !catalog.hiddenFusionUids?.length && !catalog.homeModelUids?.length && !catalog.homeConfigured &&
-      !catalog.nativeFilterTerms?.length && typeof onFusionStatus !== 'function' && typeof onNativeModels !== 'function') return data;
+      !catalog.nativeFilterTerms?.length && !capsActive && typeof onFusionStatus !== 'function' && typeof onNativeModels !== 'function') return data;
   try {
     if (format.json === true) {
       if (!shape.status) return augmentJsonList(data, catalog, shape.sorts, onFusionStatus, onNativeModels);

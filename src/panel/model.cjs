@@ -120,6 +120,8 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     goalDefaultMaxRuns: Number.isSafeInteger(config.goalDefaultMaxRuns) && config.goalDefaultMaxRuns >= 1 && config.goalDefaultMaxRuns <= 100 ? config.goalDefaultMaxRuns : 10,
     monitorRetentionDays: Number.isFinite(monitorDays) && monitorDays > 0 ? monitorDays : 7,
     autoByok: config.autoByok === true,
+    gptContextWindowCap: Number.isSafeInteger(config.gptContextWindowCap) && config.gptContextWindowCap >= 0 ? config.gptContextWindowCap : 0,
+    contextWindowCap: Number.isSafeInteger(config.contextWindowCap) && config.contextWindowCap >= 0 ? config.contextWindowCap : 0,
     nativeModelFilter: typeof config.nativeModelFilter === 'string' ? config.nativeModelFilter : DEFAULT_NATIVE_MODEL_FILTER,
     ...homeState(catalog, natives, picker),
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
@@ -354,6 +356,14 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         const value = payload.value;
         if (typeof value !== 'string' || value.length > 2000 || /[\u0000-\u001f]/.test(value)) fail('过滤条件无效。');
         config.nativeModelFilter = value;
+        break;
+      }
+      case 'setContextWindowCaps': {
+        for (const key of ['gpt', 'other']) {
+          if (!Number.isSafeInteger(payload[key]) || payload[key] < 0 || payload[key] > 2147483647) fail('上下文窗口上限必须是 0 到 2147483647 之间的整数。');
+        }
+        config.gptContextWindowCap = payload.gpt;
+        config.contextWindowCap = payload.other;
         break;
       }
       case 'setUpstreamRetries': {

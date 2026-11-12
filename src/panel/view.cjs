@@ -514,6 +514,46 @@ function panelClient(modelSupportsImages, vscode) {
         element('input', {
           type: 'number',
           class: 'retry-count',
+          min: '0',
+          max: '2147483647',
+          step: '1',
+          value: String(state.gptContextWindowCap ?? 0),
+          disabled: state.enabled === false,
+          'aria-label': 'GPT 模型上下文窗口上限',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const gpt = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setContextWindowCaps', { gpt, other: state.contextWindowCap ?? 0 }), '正在保存上下文窗口上限…')
+              .then(ok => { if (!ok) event.target.value = String(state.gptContextWindowCap ?? 0); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: 'GPT 模型上下文窗口上限' }),
+          element('span', { class: 'hint', text: '上报给 Devin 的上下文窗口封顶值（tokens），适用于 id/uid 含 gpt 的模型；官方 fusion 组合按 Lead 段判定。填 0 表示沿用模型原配置、不封顶，常用值 272000。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'number',
+          class: 'retry-count',
+          min: '0',
+          max: '2147483647',
+          step: '1',
+          value: String(state.contextWindowCap ?? 0),
+          disabled: state.enabled === false,
+          'aria-label': '其他模型上下文窗口上限',
+          onchange: event => {
+            const raw = String(event.target.value).trim();
+            const other = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+            run(() => request('setContextWindowCaps', { gpt: state.gptContextWindowCap ?? 0, other }), '正在保存上下文窗口上限…')
+              .then(ok => { if (!ok) event.target.value = String(state.contextWindowCap ?? 0); });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '其他模型上下文窗口上限' }),
+          element('span', { class: 'hint', text: '上报给 Devin 的上下文窗口封顶值（tokens），适用于 GPT 以外的所有模型（含官方内置模型与 fusion Lead）。填 0 表示沿用模型原配置、不封顶，超过 500000 的窗口可填 500000 压缩上报。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'number',
+          class: 'retry-count',
           min: '1',
           max: '100',
           step: '1',

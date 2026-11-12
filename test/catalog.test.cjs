@@ -97,6 +97,84 @@ test('own protobuf metadata matches JSON and advertises required execution harne
   }
 });
 
+test('context windows cap at configured values and stay raw when unset or zero', () => {
+  const providers = [{ id: 'p', name: 'P', models: [
+    { id: 'openai/gpt-9', label: 'GPT-9', contextWindow: 400000, maxOutputTokens: 300000 },
+    { id: 'ctx-1m', label: 'Huge', contextWindow: 1000000, maxOutputTokens: 128000 },
+  ] }];
+  const capped = buildCatalog({ gptContextWindowCap: 272000, contextWindowCap: 500000, providers });
+  const own = new Map(capped.models.map(model => [model.label, model]));
+  assert.equal(own.get('P · GPT-9').json.maxTokens, 272000);
+  assert.equal(own.get('P · GPT-9').json.modelInfo.maxOutputTokens, 272000);
+  assert.equal(own.get('P · Huge').json.maxTokens, 500000);
+  assert.equal(own.get('P · Huge').json.modelInfo.maxOutputTokens, 128000);
+  assert.equal(num(own.get('P · GPT-9').raw, 18), 272000);
+  assert.equal(num(getNested(own.get('P · GPT-9').raw, 23), 4), 272000);
+  assert.equal(num(getNested(own.get('P · GPT-9').raw, 23), 13), 272000);
+  for (const partial of [{}, { gptContextWindowCap: 0, contextWindowCap: 0 }, { contextWindowCap: 500000 }]) {
+    const labels = new Map(buildCatalog({ ...partial, providers }).models.map(model => [model.label, model]));
+    assert.equal(labels.get('P · GPT-9').json.maxTokens, 400000);
+    assert.equal(labels.get('P · GPT-9').json.modelInfo.maxOutputTokens, 300000);
+    assert.equal(labels.get('P · Huge').json.maxTokens, partial.contextWindowCap === 500000 ? 500000 : 1000000);
+  }
+  const gptOnly = new Map(buildCatalog({ gptContextWindowCap: 272000, providers }).models.map(model => [model.label, model]));
+  assert.equal(gptOnly.get('P · GPT-9').json.maxTokens, 272000);
+  assert.equal(gptOnly.get('P · Huge').json.maxTokens, 1000000);
+});
+
+test('native fusion preset leads cap context window by the same rule', () => {
+  const natives = [
+    { uid: 'ctx-1m', label: 'Huge', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'], maxTokens: 1000000, maxOutputTokens: 64000 },
+    { uid: 'gpt-9-sol-high', label: 'GPT-9', disabled: false, isModelRouter: false, harnessUids: ['gpt-9'], maxTokens: 400000, maxOutputTokens: 300000 },
+  ];
+  const result = buildSavedCatalog({ gptContextWindowCap: 272000, contextWindowCap: 500000, fusionPresets: [
+    { id: 'cap-huge', name: 'CapHuge', lead: { nativeUid: 'ctx-1m' }, sidekick: { nativeUid: 'gpt-9-sol-high' } },
+    { id: 'cap-gpt', name: 'CapGpt', lead: { nativeUid: 'gpt-9-sol-high' }, sidekick: { nativeUid: 'ctx-1m' } }] }, natives);
+  const presets = new Map(Object.values(result.fusions).map(fusion => [fusion.presetId, fusion.uid]));
+  const huge = result.models.find(model => model.uid === presets.get('cap-huge'));
+  const gpt = result.models.find(model => model.uid === presets.get('cap-gpt'));
+  assert.equal(huge.json.maxTokens, 500000);
+  assert.equal(huge.json.modelInfo.maxOutputTokens, 64000);
+  assert.equal(gpt.json.maxTokens, 272000);
+  assert.equal(gpt.json.modelInfo.maxOutputTokens, 272000);
+});
+
+for (const format of [proto, json]) test(`${format.json ? 'JSON' : 'protobuf'} official entries cap context windows by the same rule`, () => {
+  const natives = format.json ? [
+    { label: 'GPT-9 Sol', modelUid: 'gpt-9-sol-high', maxTokens: 400000,
+      modelInfo: { modelUid: 'gpt-9-sol-high', maxTokens: 400000, maxOutputTokens: 300000 } },
+    { label: 'Huge Ctx', model_uid: 'ctx-1m', max_tokens: 1000000,
+      model_info: { model_uid: 'ctx-1m', max_tokens: 1000000, max_output_tokens: 64000 } },
+    { label: 'Fusion Huge', modelUid: 'fusion-ctx-1m-sidekick-gpt-9-sol-high', maxTokens: 1000000,
+      modelInfo: { maxTokens: 1000000, maxOutputTokens: 64000 } },
+    { label: 'Small', modelUid: 'ctx-small', maxTokens: 200000, modelInfo: { maxTokens: 200000, maxOutputTokens: 64000 } },
+  ] : [
+    cat(s(1, 'GPT-9 Sol'), s(22, 'gpt-9-sol-high'), v(18, 400000), m(23, cat(v(4, 400000), v(13, 300000)))),
+    cat(s(1, 'Huge Ctx'), s(22, 'ctx-1m'), v(18, 1000000), m(23, cat(v(4, 1000000), v(13, 64000)))),
+    cat(s(1, 'Fusion Huge'), s(22, 'fusion-ctx-1m-sidekick-gpt-9-sol-high'), v(18, 1000000), m(23, cat(v(4, 1000000), v(13, 64000)))),
+    cat(s(1, 'Small'), s(22, 'ctx-small'), v(18, 200000), m(23, cat(v(4, 200000), v(13, 64000)))),
+  ];
+  const input = format.json ? { clientModelConfigs: natives } : cat(natives.map(entry => m(1, entry)));
+  const cappedCatalog = () => buildCatalog({ gptContextWindowCap: 272000, contextWindowCap: 500000 });
+  const output = augmentCatalog(input, { rpc: 'GetCliModelConfigs', format, catalog: cappedCatalog() });
+  const entries = format.json ? output.clientModelConfigs : configs(output);
+  assert.equal(entries.length, 4);
+  const tokens = entry => format.json
+    ? { top: entry.maxTokens ?? entry.max_tokens, info: (entry.modelInfo ?? entry.model_info)?.maxTokens ?? (entry.modelInfo ?? entry.model_info)?.max_tokens,
+        output: (entry.modelInfo ?? entry.model_info)?.maxOutputTokens ?? (entry.modelInfo ?? entry.model_info)?.max_output_tokens }
+    : { top: num(entry, 18), info: num(getNested(entry, 23), 4), output: num(getNested(entry, 23), 13) };
+  assert.deepEqual(tokens(entries[0]), { top: 272000, info: 272000, output: 272000 });
+  assert.deepEqual(tokens(entries[1]), { top: 500000, info: 500000, output: 64000 });
+  // 官方 fusion uid 按 Lead 段判定：ctx-1m 不是 gpt，封顶 500000。
+  assert.deepEqual(tokens(entries[2]), { top: 500000, info: 500000, output: 64000 });
+  assert.deepEqual(tokens(entries[3]), { top: 200000, info: 200000, output: 64000 });
+  assert.deepEqual(entries[3], natives[3]);
+  const raw = format.json ? augmentCatalog(input, { rpc: 'GetCliModelConfigs', format, catalog: buildCatalog({}) }).clientModelConfigs
+    : configs(augmentCatalog(input, { rpc: 'GetCliModelConfigs', format, catalog: buildCatalog({}) }));
+  assert.deepEqual(raw[0], natives[0]);
+  assert.deepEqual(augmentCatalog(output, { rpc: 'GetCliModelConfigs', format, catalog: cappedCatalog() }), output);
+});
+
 test('duplicate labels are disambiguated and invalid provider/Sidekick identities fail before publishing', () => {
   const input = { providers: [{ id: 'a', name: 'Same', models: [{ id: 'x', label: 'X' }] },
     { id: 'b', name: 'Same', models: [{ id: 'x', label: 'X' }] }], sidekicks: [{ nativeUid: 'swe-2-max' }] };
