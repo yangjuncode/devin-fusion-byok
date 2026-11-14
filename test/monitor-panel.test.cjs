@@ -63,9 +63,16 @@ test('monitor time range filters records and collapsible sections default collap
   byId('monitor-range').listeners.change();
   assert.equal(byId('monitor-requests').children.length, 3, '切回全部后显示所有记录');
   const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
-  for (const id of ['models-card', 'fusion-card', 'native-card', 'monitor-meta']) {
+  for (const id of ['models-card', 'fusion-card', 'native-card', 'home-card', 'monitor-meta']) {
     const tag = html.match(new RegExp('<details id="' + id + '"[^>]*>'))?.[0] || '';
     assert.ok(tag && !tag.includes('open'), id + ' 默认折叠');
+  }
+  const setupTag = html.match(/<details id="setup-card"[^>]*>/)?.[0] || '';
+  assert.ok(setupTag.includes('open'), '供应商与模型设置默认展开');
+  const setup = html.indexOf('id="setup-card"');
+  for (const id of ['fusion-card', 'native-card', 'home-card']) {
+    const inner = html.indexOf('id="' + id + '"');
+    assert.ok(setup < inner && inner < html.indexOf('id="usage-monitor"'), id + ' 位于设置折叠区内');
   }
   const monitorTag = html.match(/<details id="usage-monitor"[^>]*>/)?.[0] || '';
   assert.ok(monitorTag.includes('open'), '用量与性能卡片默认展开');

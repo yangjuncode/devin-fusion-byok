@@ -31,7 +31,7 @@ function monitorScript() {
       const node = document.getElementById(id);
       if (node && typeof node.open === 'boolean') node.open = open === true;
     }
-    for (const id of ['usage-monitor', 'monitor-meta', 'models-card', 'fusion-card', 'native-card']) {
+    for (const id of ['usage-monitor', 'monitor-meta', 'models-card', 'fusion-card', 'native-card', 'home-card', 'setup-card']) {
       const node = document.getElementById(id);
       if (node) node.addEventListener('toggle', () => { folds = { ...folds, [id]: node.open }; persist({ folds }); });
     }

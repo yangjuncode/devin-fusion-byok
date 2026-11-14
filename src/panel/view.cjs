@@ -149,29 +149,34 @@ function renderPanel({ nonce, cspSource }) {
       <label class="toggle"><input id="plugin-enabled" type="checkbox" disabled><span>启用插件</span></label>
     </header>
     <div id="status" class="status" role="status" aria-live="polite">正在读取配置…</div>
-    <div class="workspace">
-      <section class="card" aria-labelledby="provider-heading">
-        <div class="card-head"><h2 id="provider-heading">供应商</h2><button id="add-provider" class="quiet" type="button" disabled>添加</button></div>
-        <nav id="providers" class="provider-list" aria-label="供应商列表"></nav>
-      </section>
-      <details id="models-card" class="card" aria-labelledby="model-heading">
-        <summary class="card-head"><h2 id="model-heading">导入的模型</h2><span class="head-meta"><span id="model-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
-        <div id="models" class="card-content"><div class="empty">读取后即可管理模型。</div></div>
-      </details>
-    </div>
-    <details id="fusion-card" class="card fusion-card" aria-labelledby="fusion-heading">
-      <summary class="card-head"><h2 id="fusion-heading">Fusion 组合</h2><span class="head-meta"><span id="fusion-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
-      <div id="fusion" class="card-content"></div>
+    <details id="setup-card" class="card fusion-card" open aria-labelledby="setup-heading">
+      <summary class="card-head"><h2 id="setup-heading">供应商与模型设置</h2><span class="chevron" aria-hidden="true">▸</span></summary>
+      <div class="card-content">
+        <div class="workspace">
+          <section class="card" aria-labelledby="provider-heading">
+            <div class="card-head"><h2 id="provider-heading">供应商</h2><button id="add-provider" class="quiet" type="button" disabled>添加</button></div>
+            <nav id="providers" class="provider-list" aria-label="供应商列表"></nav>
+          </section>
+          <details id="models-card" class="card" aria-labelledby="model-heading">
+            <summary class="card-head"><h2 id="model-heading">导入的模型</h2><span class="head-meta"><span id="model-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
+            <div id="models" class="card-content"><div class="empty">读取后即可管理模型。</div></div>
+          </details>
+        </div>
+        <details id="fusion-card" class="card fusion-card" aria-labelledby="fusion-heading">
+          <summary class="card-head"><h2 id="fusion-heading">Fusion 组合</h2><span class="head-meta"><span id="fusion-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
+          <div id="fusion" class="card-content"></div>
+        </details>
+        <details id="native-card" class="card fusion-card" aria-labelledby="native-heading">
+          <summary class="card-head"><h2 id="native-heading">官方模型</h2><span class="head-meta"><span id="native-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
+          <div id="native-models" class="card-content"></div>
+        </details>
+        <details id="home-card" class="card fusion-card" aria-labelledby="home-heading">
+          <summary class="card-head"><h2 id="home-heading">选择器第一页</h2><span class="head-meta"><span id="home-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
+          <div id="home-models" class="card-content"></div>
+        </details>
+        <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
+      </div>
     </details>
-    <details id="native-card" class="card fusion-card" aria-labelledby="native-heading">
-      <summary class="card-head"><h2 id="native-heading">官方模型</h2><span class="head-meta"><span id="native-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
-      <div id="native-models" class="card-content"></div>
-    </details>
-    <details id="home-card" class="card fusion-card" aria-labelledby="home-heading">
-      <summary class="card-head"><h2 id="home-heading">选择器第一页</h2><span class="head-meta"><span id="home-count" class="hint"></span><span class="chevron" aria-hidden="true">▸</span></span></summary>
-      <div id="home-models" class="card-content"></div>
-    </details>
-    <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
     ${monitorMarkup()}
   </main>
   <dialog id="editor-dialog" aria-labelledby="dialog-title"></dialog>
