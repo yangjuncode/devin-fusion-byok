@@ -100,6 +100,7 @@ function renderPanel({ nonce, cspSource }) {
     .default-controls select { min-width: 0; }
     .footnote { margin: 10px 0 0; }
     #usage-monitor[open] { flex: 1; display: flex; flex-direction: column; }
+    #usage-monitor[open]::details-content { flex: 1; display: flex; flex-direction: column; }
     #usage-monitor[open] > .card-content { flex: 1; display: flex; flex-direction: column; }
     .monitor-table-wrap { overflow: auto; flex: 1 1 480px; min-height: 240px; }
     .monitor-table { border-collapse: collapse; white-space: nowrap; width: 100%; }
