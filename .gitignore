@@ -8,3 +8,4 @@ qa/
 logs/
 *.local
 github.com/
+*.tar.gz
