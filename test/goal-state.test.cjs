@@ -459,6 +459,33 @@ test('a goal whose lock is held by a live foreign controller is never mutated or
   assert.equal(store.readOwnership(h.root, 'session-1').ownerId, foreignOwner);
 });
 
+test('force archive bypasses a foreign lock, moves the goal to history and drops the lock', async t => {
+  const h = await started(t);
+  const goal = h.goal();
+  const foreignOwner = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: foreignOwner, sessionId: 'session-1', startedAt: 1 }));
+  h.controller.dispose();
+  const other = createGoalController({
+    root: h.root, owner: crypto.randomBytes(16).toString('hex'), scheduler: fakeScheduler(),
+    reportCliPath: REPORT_CLI, now: () => 1700000000000,
+    transport: {
+      dispatch: () => ({ ok: true }), cancel: () => ({ ok: true }), sessions: () => [],
+      sessionStatus: () => 'idle', setListener: () => {}, setGoalOwned: () => {}
+    },
+    isEnabled: () => true, isTrusted: () => true
+  });
+  t.after(() => other.dispose());
+  assert.equal(other.snapshot().goals.find(item => item.id === goal.id).locked, true);
+  assert.throws(() => other.archive({ id: goal.id }), /另一个窗口/);
+  const archived = other.archive({ id: goal.id, force: true });
+  assert.equal(archived.archived, true);
+  assert.equal(fs.existsSync(store.goalFile(h.root, 'session-1')), false);
+  assert.equal(store.readOwnership(h.root, 'session-1'), null);
+  assert.equal(other.snapshot().goals.length, 0);
+  assert.equal(other.snapshot().history.length, 1);
+  assert.throws(() => other.archive({ id: goal.id, force: true }), /已经归档/);
+});
+
 test('a lock-free review goal can be explicitly reclaimed by a human action after restart', async t => {
   const h = await started(t);
   const goal = h.goal();

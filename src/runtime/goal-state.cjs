@@ -501,6 +501,10 @@ function createGoalController({
       if (action === 'start') return commandStart(clean, text);
       return null;
     } catch (error) {
+      if (error?.code === 'not-owner') {
+        return reply('/goal 没有执行：' + error.message +
+          '如果占用它的窗口或进程已经退出，请打开 Goal 面板（点状态栏的 Goal），对该目标使用"强制归档"。');
+      }
       if (error?.code) return reply('/goal 没有执行：' + error.message);
       return reply('/goal 没有执行：发生了意外错误。');
     }
@@ -725,12 +729,14 @@ function createGoalController({
       if (!persist(record)) throw goalError('store-write-failed', '目标状态写入失败。');
       return readById(record.id) || record;
     },
-    archive({ id } = {}) {
+    archive({ id, force } = {}) {
       const found = goalOf(id);
       if (found.archivedAt !== null) throw goalError('archived', '该目标已经归档。');
-      const record = reclaim(found);
+      const record = force === true ? found : reclaim(found);
       if (record.archivedAt !== null) throw goalError('archived', '该目标已经归档。');
-      return archiveRecord(record);
+      const archived = archiveRecord(record);
+      if (force === true) store.dropOwnership(root, record.sessionId);
+      return archived;
     },
     dispose() {
       if (disposed) return;

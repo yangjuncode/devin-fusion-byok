@@ -148,6 +148,30 @@ test('locked, archived and completed goals render the limit as plain text', () =
   assert.equal(collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑').length, 0);
 });
 
+test('a locked goal renders an enabled force-archive button that posts goal.forceArchive', () => {
+  const { byId, posts, receive } = webview();
+  const data = state();
+  data.goals[0].locked = true;
+  receive({ data: { type: 'goal-state', state: data } });
+  const buttons = collect(byId('goals'), node => node.tag === 'button');
+  const force = buttons.find(node => node.textContent === '强制归档');
+  assert.ok(force);
+  assert.equal(force.disabled, false);
+  assert.ok(buttons.every(node => node === force || node.disabled));
+  force.onclick();
+  const posted = posts.find(post => post.type === 'goal.forceArchive');
+  assert.equal(posted.payload.id, 'a'.repeat(32));
+});
+
+test('an archived goal never renders a force-archive button', () => {
+  const { byId, receive } = webview();
+  const data = state();
+  data.goals[0].locked = true;
+  data.goals[0].archived = true;
+  receive({ data: { type: 'goal-state', state: data } });
+  assert.equal(collect(byId('goals'), node => node.tag === 'button' && node.textContent === '强制归档').length, 0);
+});
+
 test('the edit button opens an in-place editor that posts goal.updateObjective', () => {
   const { byId, posts, receive } = webview();
   receive({ data: { type: 'goal-state', state: state() } });
@@ -356,6 +380,19 @@ test('archive asks for confirmation only when the current goal is still active',
   assert.deepEqual(paused.calls.map(call => call[0]), ['archive']);
   assert.equal(paused.warnings.length, 0);
   paused.handle.dispose();
+});
+
+test('force archive always asks the host for confirmation and passes force to the controller', async () => {
+  const declined = host({ confirmAnswer: null });
+  await declined.receive({ type: 'goal.forceArchive', id: '1', payload: { id: 'a'.repeat(32) }, confirm: true });
+  assert.equal(declined.calls.length, 0);
+  assert.equal(declined.warnings.length, 1);
+  declined.handle.dispose();
+  const confirmed = host();
+  await confirmed.receive({ type: 'goal.forceArchive', id: '1', payload: { id: 'a'.repeat(32) } });
+  assert.deepEqual(confirmed.calls, [['archive', { id: 'a'.repeat(32), force: true }]]);
+  assert.equal(confirmed.warnings.length, 1);
+  confirmed.handle.dispose();
 });
 
 test('resuming an exhausted goal asks for a validated new total limit', async () => {

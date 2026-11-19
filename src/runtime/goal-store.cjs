@@ -426,6 +426,11 @@ function releaseOwnership(root, sessionId, { owner } = {}) {
   if (!existing || existing.corrupt || existing.ownerId !== cleanOwner) return false;
   return removeFile(lockFile(root, clean));
 }
+function dropOwnership(root, sessionId) {
+  const clean = identifier(sessionId);
+  if (!clean) return false;
+  return removeFile(lockFile(root, clean));
+}
 
 module.exports = {
   GOAL_DIR, SCHEMA_VERSION, MAX_RECORD_BYTES, MAX_EVIDENCE_LENGTH, MAX_OBJECTIVE_LENGTH, MAX_CRITERIA_LENGTH,
@@ -437,5 +442,5 @@ module.exports = {
   validGoalRecord, readGoal, scanGoals, scanHistory, listGoals, readGoalById, writeGoal, archiveGoal,
   issueCapability, readCapability, removeCapability, removeCapabilitiesExcept, removeCapabilitiesForGoal,
   removeCapabilitiesForRun, writeReport, readReport, removeReport, isProcessAlive, readOwnership, acquireOwnership,
-  releaseOwnership, MAX_GOALS, MAX_HISTORY
+  releaseOwnership, dropOwnership, MAX_GOALS, MAX_HISTORY
 };

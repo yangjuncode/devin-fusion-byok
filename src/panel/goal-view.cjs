@@ -20,7 +20,7 @@ const REASON_LABELS = {
 };
 function statusText(goal) {
   const base = STATUS_LABELS[goal.status] || goal.status;
-  if (goal.locked) return base + '（该会话由另一个窗口占用，本窗口不可操作）';
+  if (goal.locked) return base + '（该会话由另一个窗口占用，本窗口不可操作；若该窗口已退出，可用"强制归档"解除）';
   const reason = goal.reason ? REASON_LABELS[goal.reason] || goal.reason : '';
   return reason ? base + ' · ' + reason : base;
 }
@@ -30,7 +30,7 @@ function goalScript() {
 const STATUS_LABELS=${JSON.stringify(STATUS_LABELS)},REASON_LABELS=${JSON.stringify(REASON_LABELS)},SESSION_LABELS=${JSON.stringify(SESSION_LABELS)};
 const el=id=>document.getElementById(id);
 function statusText(goal){const base=STATUS_LABELS[goal.status]||goal.status;
-if(goal.locked)return base+'（该会话由另一个窗口占用，本窗口不可操作）';
+if(goal.locked)return base+'（该会话由另一个窗口占用，本窗口不可操作；若该窗口已退出，可用"强制归档"解除）';
 const reason=goal.reason?(REASON_LABELS[goal.reason]||goal.reason):'';return reason?base+' · '+reason:base;}
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
 function sessionLabel(id){const session=sessions.find(s=>s.sessionId===id);const label=session?.title||id;
@@ -83,12 +83,13 @@ if(!goal.evidence.length)evidence.textContent='尚无证据。';
 for(const entry of goal.evidence){const line=document.createElement('pre');line.textContent='['+entry.status+'] '+entry.evidence;evidence.append(line);}
 item.append(evidence);
 const actions=document.createElement('div');actions.className='actions';
-const act=(type,label,extra,needsConfirm)=>{const b=document.createElement('button');b.textContent=label;
-b.disabled=!!goal.locked;b.onclick=()=>send(type,Object.assign({id:goal.id},extra||{}),needsConfirm);actions.append(b);};
+const act=(type,label,extra,needsConfirm,ignoreLock)=>{const b=document.createElement('button');b.textContent=label;
+b.disabled=!!goal.locked&&ignoreLock!==true;b.onclick=()=>send(type,Object.assign({id:goal.id},extra||{}),needsConfirm);actions.append(b);};
 if(!goal.locked){if(goal.status==='active')act('goal.pause','暂停');
 else if(!goal.archived&&goal.status!=='completed')act('goal.resume','恢复',{},false);
 if(goal.status==='review')act('goal.accept','验收完成',{},true);
 if(!goal.archived)act('goal.archive','归档',{},goal.status==='active');}
+else if(!goal.archived)act('goal.forceArchive','强制归档',{},true,true);
 item.append(actions);list.append(item);}
 if(editGoalId&&!(state.goals||[]).some(g=>g.id===editGoalId)){editGoalId='';editDraft='';editSaving='';editRendered=false;}
 editFocus=hadEditFocus;
@@ -180,6 +181,9 @@ function createGoalUi({ vscode, context, controller, isEnabled = () => true, isT
         const goal = (state().goals || []).find(item => item.id === payload.id);
         if (goal && goal.status === 'active' && !(await confirm('该目标仍在运行，确认归档并停止自动推进？'))) return;
         result = controller.archive(payload);
+      } else if (message.type === 'goal.forceArchive') {
+        if (!(await confirm('该目标由另一个窗口或进程持有。若持有方仍在运行会被一并中断，请仅在持有方已退出时使用。确认强制归档并解除占用？'))) return;
+        result = controller.archive({ id: payload.id, force: true });
       } else return;
       await target.webview.postMessage({ type: 'goal-result', id: message.id, ok: true });
       await target.webview.postMessage({ type: 'goal-state', state: state() });

@@ -111,6 +111,17 @@ test('ownership is exclusive, never steals a dead owner, and distinguishes same-
   assert.equal(corrupt.reason, 'owned-by-unknown');
 });
 
+test('dropOwnership removes a lock regardless of owner, for explicit force archive', t => {
+  const base = root(t);
+  const owner = crypto.randomBytes(16).toString('hex');
+  assert.equal(store.acquireOwnership(base, 's1', { owner }).ok, true);
+  assert.equal(store.releaseOwnership(base, 's1', { owner: crypto.randomBytes(16).toString('hex') }), false);
+  assert.equal(store.dropOwnership(base, 's1'), true);
+  assert.equal(store.readOwnership(base, 's1'), null);
+  assert.equal(store.dropOwnership(base, 's1'), false);
+  assert.equal(store.dropOwnership(base, ''), false);
+});
+
 test('capability tokens are single-run, path-safe, and cleaned per run', t => {
   const base = root(t);
   const goal = seedGoal(base);
