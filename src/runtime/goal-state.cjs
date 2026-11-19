@@ -421,13 +421,7 @@ function createGoalController({
     const objectiveText = store.normalizeObjective(text);
     if (!objectiveText) throw goalError('invalid-objective', '目标描述必须是 1 到 ' + store.MAX_OBJECTIVE_LENGTH + ' 字符的文本。');
     const existing = sessionGoal(clean);
-    if (existing) {
-      const ownership = ownershipOf(clean);
-      if (ownership && (ownership.corrupt || ownership.ownerId !== cleanOwner)) {
-        throw goalError('not-owner', '这个对话的目标正由另一个窗口管理，本窗口不接管。');
-      }
-      archiveRecord(reclaim(existing));
-    }
+    if (existing) archiveRecord(reclaim(existing));
     startable(clean);
     acquire(clean);
     startable(clean);
@@ -521,12 +515,58 @@ function createGoalController({
     } catch (error) { storeError = error.message; }
   }
 
+  function settleOrphaned(record, ownership) {
+    // 宿主进程已消失的目标：摘掉死锁、消化已落盘的汇报，再把
+    // “进行中”降级为暂停，之后任意窗口都能 resume 接管。
+    if (ownership) store.dropOwnership(root, record.sessionId);
+    let submitted = null;
+    if (record.activeRun) {
+      try { submitted = store.readReport(root, record.activeRun); }
+      catch (error) { storeError = error.message; }
+    }
+    const valid = submitted && submitted.id === record.id && submitted.revision === record.revision &&
+      submitted.sessionId === record.sessionId;
+    cancelTimer(record.id);
+    bumpGeneration(record.id);
+    if (valid) {
+      record.evidence = [...record.evidence, {
+        runId: record.activeRun, revision: submitted.revision, status: submitted.status,
+        evidence: submitted.evidence, submittedAt: submitted.submittedAt
+      }].slice(-store.MAX_EVIDENCE_ENTRIES);
+      record.missingRuns = 0;
+    }
+    invalidateRun(record);
+    record.retryWindow = null;
+    if (valid && submitted.status === 'complete') {
+      record.status = 'completed'; record.reason = 'achieved';
+      try {
+        archiveRecord(record);
+        report('goal-orphan-completed', {});
+        return;
+      } catch {}
+    }
+    if (valid && ['waiting', 'blocked', 'review'].includes(submitted.status)) {
+      record.status = submitted.status; record.reason = submitted.status;
+    } else if (['active', 'retrying'].includes(record.status)) {
+      record.status = 'paused'; record.reason = 'owner-exited';
+    }
+    persist(record);
+    report('goal-orphan-settled', { status: record.status });
+  }
+
   function restore() {
     for (const record of scan().goals) {
       if (record.archivedAt !== null) continue;
-      if (!isLocalOwner(record.sessionId)) continue;
-      if (record.activeRun === null && !['active', 'retrying'].includes(record.status)) continue;
-      try { pauseGoal(record, 'reloaded'); } catch {}
+      if (isLocalOwner(record.sessionId)) {
+        if (record.activeRun === null && !['active', 'retrying'].includes(record.status)) continue;
+        try { pauseGoal(record, 'reloaded'); } catch {}
+        continue;
+      }
+      const ownership = ownershipOf(record.sessionId);
+      // 活锁与损坏锁都不碰——另一个窗口可能仍在驱动；无锁或持有者
+      // 进程已死说明宿主已消失，目标才会永远卡在“进行中”。
+      if (ownership && (ownership.corrupt || store.isProcessAlive(ownership.pid))) continue;
+      try { settleOrphaned(record, ownership); } catch {}
     }
   }
   function requireBoundary() {
@@ -548,10 +588,11 @@ function createGoalController({
   }
   function reclaim(record) {
     const ownership = ownershipOf(record.sessionId);
-    if (ownership && (ownership.corrupt || ownership.ownerId !== cleanOwner)) {
+    if (ownership && !ownership.corrupt && ownership.ownerId === cleanOwner) return record;
+    // 活的外来锁与损坏锁仍拒绝；持有者进程已死（或根本没有锁）时向下走接管。
+    if (ownership && (ownership.corrupt || store.isProcessAlive(ownership.pid))) {
       throw goalError('not-owner', '该目标属于另一个窗口或进程，本窗口不操作。');
     }
-    if (ownership) return record;
     const acquired = acquire(record.sessionId);
     report('goal-ownership-reclaimed', { stale: acquired.stale === true });
     return readById(record.id) || record;

@@ -424,7 +424,39 @@ function acquireOwnership(root, sessionId, { owner, now = Date.now, alive = isPr
     if (existing.ownerId === cleanOwner) return { ok: true, owner: existing };
     if (existing.corrupt) return { ok: false, reason: 'owned-by-unknown', owner: null };
     if (existing.pid === process.pid) return { ok: false, reason: 'owned-by-other-controller', owner: existing };
-    return { ok: false, reason: alive(existing.pid) ? 'owned-by-live-process' : 'owned-by-dead-process', owner: existing };
+    if (alive(existing.pid)) return { ok: false, reason: 'owned-by-live-process', owner: existing };
+    // 持有者进程已死：ownerId 只存在于死进程的内存里，锁必然成为孤儿。
+    // 用 rename 把死锁原子挪走——多个接管者里只有一个能成功；挪到的内容
+    // 若不是当初读到的死锁（被别的接管者抢先换成了活锁），尽力 link 还原，
+    // 绝不替活锁“让位”。随后重新读锁，按现状走正常创建或拒绝。
+    const stale = file + '.stale-' + existing.ownerId;
+    let moved = false;
+    try { fs.renameSync(file, stale); moved = true; } catch {}
+    if (moved) {
+      let movedRecord = null;
+      try { movedRecord = readJsonFile(stale); } catch {}
+      if (movedRecord && movedRecord.ownerId === existing.ownerId &&
+          movedRecord.pid === existing.pid && movedRecord.sessionId === existing.sessionId) {
+        removeFile(stale);
+      } else {
+        try { fs.linkSync(stale, file); } catch {}
+        removeFile(stale);
+      }
+    }
+    const current = readOwnership(root, clean);
+    if (current) {
+      if (current.ownerId === cleanOwner) return { ok: true, owner: current };
+      if (current.corrupt) return { ok: false, reason: 'owned-by-unknown', owner: null };
+      if (current.pid === process.pid) return { ok: false, reason: 'owned-by-other-controller', owner: current };
+      return { ok: false, reason: alive(current.pid) ? 'owned-by-live-process' : 'owned-by-dead-process', owner: current };
+    }
+    const record = { schemaVersion: SCHEMA_VERSION, pid: process.pid, ownerId: cleanOwner, sessionId: clean, startedAt: now() };
+    try { publishExclusive(file, record); }
+    catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      return { ok: false, reason: 'owned-by-live-process', owner: readOwnership(root, clean) };
+    }
+    return { ok: true, owner: record, stale: true };
   }
   const record = { schemaVersion: SCHEMA_VERSION, pid: process.pid, ownerId: cleanOwner, sessionId: clean, startedAt: now() };
   try { publishExclusive(file, record); }

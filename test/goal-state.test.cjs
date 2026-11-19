@@ -459,11 +459,12 @@ test('a goal whose lock is held by a live foreign controller is never mutated or
   assert.equal(store.readOwnership(h.root, 'session-1').ownerId, foreignOwner);
 });
 
-test('force archive bypasses a foreign lock, moves the goal to history and drops the lock', async t => {
+test('force archive bypasses a live foreign lock, moves the goal to history and drops the lock', async t => {
   const h = await started(t);
   const goal = h.goal();
   const foreignOwner = crypto.randomBytes(16).toString('hex');
-  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: foreignOwner, sessionId: 'session-1', startedAt: 1 }));
+  // 外来锁的持有者必须真的活着（ppid 始终存活），否则 restore 会把它当孤儿清掉。
+  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: process.ppid, ownerId: foreignOwner, sessionId: 'session-1', startedAt: 1 }));
   h.controller.dispose();
   const other = createGoalController({
     root: h.root, owner: crypto.randomBytes(16).toString('hex'), scheduler: fakeScheduler(),
@@ -540,6 +541,89 @@ test('a lock-free paused goal can be reclaimed on resume after restart', async t
   second.resume({ id: goal.id });
   await tick();
   assert.equal(dispatched.length, 1);
+  assert.equal(second.snapshot().goals.find(item => item.id === goal.id).status, 'active');
+});
+
+test('restore settles an orphaned active goal left behind by a dead owner', async t => {
+  const h = await started(t);
+  const goal = h.goal();
+  h.controller.dispose();
+  const record = JSON.parse(fs.readFileSync(store.goalFile(h.root, 'session-1'), 'utf8'));
+  fs.writeFileSync(store.goalFile(h.root, 'session-1'), JSON.stringify({ ...record, status: 'active', reason: null, activeRun: crypto.randomUUID() }));
+  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: crypto.randomBytes(16).toString('hex'), sessionId: 'session-1', startedAt: 1 }));
+  const second = createGoalController({
+    root: h.root, owner: crypto.randomBytes(16).toString('hex'), scheduler: fakeScheduler(),
+    reportCliPath: REPORT_CLI, now: () => 1700000000000,
+    transport: {
+      dispatch: () => ({ ok: true }), cancel: () => ({ ok: true }), sessions: () => [],
+      sessionStatus: () => 'idle', setListener: () => {}, setGoalOwned: () => {}
+    },
+    isEnabled: () => true, isTrusted: () => true
+  });
+  t.after(() => second.dispose());
+  const restored = second.snapshot().goals.find(item => item.id === goal.id);
+  assert.equal(restored.status, 'paused');
+  assert.equal(restored.reason, 'owner-exited');
+  assert.equal(restored.activeRun, null);
+  assert.equal(restored.locked, false);
+  assert.equal(store.readOwnership(h.root, 'session-1'), null);
+});
+
+test('restore folds a submitted report from an orphaned run into evidence', async t => {
+  const h = await started(t);
+  const goal = h.goal();
+  h.controller.dispose();
+  const record = JSON.parse(fs.readFileSync(store.goalFile(h.root, 'session-1'), 'utf8'));
+  const run = crypto.randomUUID();
+  fs.writeFileSync(store.goalFile(h.root, 'session-1'), JSON.stringify({ ...record, status: 'active', reason: null, activeRun: run }));
+  store.writeReport(h.root, run, { id: goal.id, sessionId: 'session-1', revision: record.revision, status: 'waiting', evidence: 'need user input' });
+  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: crypto.randomBytes(16).toString('hex'), sessionId: 'session-1', startedAt: 1 }));
+  const second = createGoalController({
+    root: h.root, owner: crypto.randomBytes(16).toString('hex'), scheduler: fakeScheduler(),
+    reportCliPath: REPORT_CLI, now: () => 1700000000000,
+    transport: {
+      dispatch: () => ({ ok: true }), cancel: () => ({ ok: true }), sessions: () => [],
+      sessionStatus: () => 'idle', setListener: () => {}, setGoalOwned: () => {}
+    },
+    isEnabled: () => true, isTrusted: () => true
+  });
+  t.after(() => second.dispose());
+  const restored = second.snapshot().goals.find(item => item.id === goal.id);
+  assert.equal(restored.status, 'waiting');
+  assert.equal(restored.reason, 'waiting');
+  assert.equal(restored.activeRun, null);
+  assert.equal(restored.locked, false);
+  assert.equal(restored.evidence.length, 1);
+  assert.equal(restored.evidence[0].evidence, 'need user input');
+  assert.equal(store.readReport(h.root, run), null);
+  assert.equal(store.readOwnership(h.root, 'session-1'), null);
+});
+
+test('a goal behind a dead foreign lock can be archived and resumed without force', async t => {
+  const h = await started(t);
+  const goal = h.goal();
+  h.controller.pause({ id: goal.id });
+  h.controller.dispose();
+  fs.writeFileSync(store.lockFile(h.root, 'session-1'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: crypto.randomBytes(16).toString('hex'), sessionId: 'session-1', startedAt: 1 }));
+  const dispatched = [];
+  const second = createGoalController({
+    root: h.root, owner: crypto.randomBytes(16).toString('hex'), scheduler: fakeScheduler(),
+    reportCliPath: REPORT_CLI, now: () => 1700000000000,
+    transport: {
+      dispatch: request => { dispatched.push(request); return { ok: true, runId: request.runId }; },
+      cancel: () => ({ ok: true }), sessions: () => [{ sessionId: 'session-1', status: 'idle' }],
+      sessionStatus: () => 'idle', setListener: () => {}, setGoalOwned: () => {}
+    },
+    isEnabled: () => true, isTrusted: () => true
+  });
+  t.after(() => second.dispose());
+  const restored = second.snapshot().goals.find(item => item.id === goal.id);
+  assert.equal(restored.locked, false);
+  second.resume({ id: goal.id });
+  await tick();
+  assert.equal(dispatched.length, 1);
+  const held = store.readOwnership(h.root, 'session-1');
+  assert.equal(held.pid, process.pid);
   assert.equal(second.snapshot().goals.find(item => item.id === goal.id).status, 'active');
 });
 

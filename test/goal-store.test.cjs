@@ -86,7 +86,7 @@ test('oversized records are refused rather than parsed', t => {
   assert.throws(() => store.readGoal(base, 'session-1'), /goal_store_record_too_large/);
 });
 
-test('ownership is exclusive, never steals a dead owner, and distinguishes same-pid controllers', t => {
+test('ownership is exclusive, reclaims dead owners atomically, and distinguishes same-pid controllers', t => {
   const base = root(t);
   const first = crypto.randomBytes(16).toString('hex');
   const second = crypto.randomBytes(16).toString('hex');
@@ -95,14 +95,24 @@ test('ownership is exclusive, never steals a dead owner, and distinguishes same-
   const blocked = store.acquireOwnership(base, 's1', { owner: second });
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, 'owned-by-other-controller');
+  // 持有者进程已死：锁可以安全接管，并带 stale 标记。
   fs.writeFileSync(store.lockFile(base, 's2'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: first, sessionId: 's2', startedAt: 1 }));
   const stale = store.acquireOwnership(base, 's2', { owner: second, alive: () => false });
-  assert.equal(stale.ok, false);
-  assert.equal(stale.reason, 'owned-by-dead-process');
-  const live = store.acquireOwnership(base, 's2', { owner: second, alive: () => true });
+  assert.equal(stale.ok, true);
+  assert.equal(stale.stale, true);
+  assert.equal(store.readOwnership(base, 's2').ownerId, second);
+  assert.equal(store.readOwnership(base, 's2').pid, process.pid);
+  // 接管后的锁就是普通活锁：别的 owner 再抢会被拒绝。
+  const afterReclaim = store.acquireOwnership(base, 's2', { owner: first });
+  assert.equal(afterReclaim.ok, false);
+  assert.equal(afterReclaim.reason, 'owned-by-other-controller');
+  // 持有者进程仍活着时一律拒绝（模拟 PID 被复用/远端仍存活）。
+  fs.writeFileSync(store.lockFile(base, 's4'), JSON.stringify({ schemaVersion: 1, pid: 999999, ownerId: first, sessionId: 's4', startedAt: 1 }));
+  const live = store.acquireOwnership(base, 's4', { owner: second, alive: () => true });
   assert.equal(live.ok, false);
   assert.equal(live.reason, 'owned-by-live-process');
-  assert.equal(store.releaseOwnership(base, 's2', { owner: second }), false);
+  assert.equal(store.readOwnership(base, 's4').ownerId, first);
+  assert.equal(store.releaseOwnership(base, 's2', { owner: first }), false);
   assert.equal(store.releaseOwnership(base, 's1', { owner: first }), true);
   assert.equal(store.acquireOwnership(base, 's1', { owner: second }).ok, true);
   fs.writeFileSync(store.lockFile(base, 's3'), '{ broken');

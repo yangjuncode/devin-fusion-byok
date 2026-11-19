@@ -56,7 +56,7 @@ function autoByokRoute(current, chat) {
   return { uid: chat.modelUid, providerId: found.provider.id, model: found.model.id,
     effort: normId(found.model.id) === uid ? undefined : effort, maxOutputTokens };
 }
-const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'backend-env.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-choices.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
+const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'backend-env.cjs', 'bridge.cjs', 'monitor.cjs', 'maintenance.cjs', '../config.cjs', '../catalog.cjs', '../model-choices.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs', '../protocol/codex.cjs'];
 function sourceId() {
   const hash = crypto.createHash('sha256');
   for (const name of SOURCE_FILES) hash.update(name).update('\0').update(fs.readFileSync(path.resolve(__dirname, name))).update('\0');
@@ -381,6 +381,16 @@ if (require.main === module) {
   startBackend({ root, log }).then(backend => {
     backend.stopped.then(() => process.exit(0));
     for (const name of ['SIGTERM', 'SIGINT']) process.on(name, () => backend.close().then(() => process.exit(0)));
+    // 存储维护：启动后让 HTTP 服务先就绪再跑，之后每 6 小时重复一次。
+    // 清理 devin-cli 死锁/过期日志与会话库超容部分，保留期与 monitor 同配置。
+    const MAINTENANCE_INTERVAL_MS = 6 * 3600000;
+    const runMaintenance = () => {
+      try {
+        const { runMaintenance: run } = require('./maintenance.cjs');
+        run({ storeRoot: root, retentionDays: (() => { try { return config().monitorRetentionDays; } catch { return undefined; } })(), log });
+      } catch (error) { log('maintenance-failed', { code: error?.code || 'unknown' }); }
+    };
+    setTimeout(() => { runMaintenance(); setInterval(runMaintenance, MAINTENANCE_INTERVAL_MS).unref(); }, 5000).unref();
   }).catch(error => { log('startup-error', { code: error.code === 'EADDRINUSE' ? 'port_in_use' : 'startup_failed' }); process.exit(error.code === 'EADDRINUSE' ? 0 : 1); });
 }
 module.exports = { startBackend, runtimeIdentity, controlFile, PORT, VERSION, MANAGEMENT_PROTOCOL };
