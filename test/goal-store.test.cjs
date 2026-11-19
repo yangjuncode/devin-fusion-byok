@@ -111,6 +111,26 @@ test('ownership is exclusive, never steals a dead owner, and distinguishes same-
   assert.equal(corrupt.reason, 'owned-by-unknown');
 });
 
+test('removeHistory deletes the archived record plus its leftover reports and capabilities', t => {
+  const base = root(t);
+  const goal = seedGoal(base);
+  const run = crypto.randomUUID();
+  const token = capabilityFor(base, goal, run);
+  store.writeReport(base, run, { id: goal.id, sessionId: goal.sessionId, revision: 1, status: 'complete', evidence: 'done' });
+  store.archiveGoal(base, {
+    ...goal, revision: 2, activeRun: null, status: 'completed', reason: 'achieved',
+    archivedAt: 1700000000001, updatedAt: 1700000000001,
+    evidence: [{ runId: run, revision: 1, status: 'complete', evidence: 'done', submittedAt: 1 }]
+  });
+  assert.equal(store.readGoal(base, goal.sessionId), null);
+  assert.equal(store.removeHistory(base, goal.id), true);
+  assert.equal(store.readGoalById(base, goal.id), null);
+  assert.equal(store.readReport(base, run), null);
+  assert.equal(store.readCapability(base, token), null);
+  assert.equal(store.removeHistory(base, goal.id), false);
+  assert.equal(store.removeHistory(base, 'not-an-id'), false);
+});
+
 test('dropOwnership removes a lock regardless of owner, for explicit force archive', t => {
   const base = root(t);
   const owner = crypto.randomBytes(16).toString('hex');

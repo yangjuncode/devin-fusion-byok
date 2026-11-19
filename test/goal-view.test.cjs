@@ -172,6 +172,18 @@ test('an archived goal never renders a force-archive button', () => {
   assert.equal(collect(byId('goals'), node => node.tag === 'button' && node.textContent === '强制归档').length, 0);
 });
 
+test('each archived history entry renders a delete button that posts goal.remove', () => {
+  const { byId, posts, receive } = webview();
+  const data = state();
+  data.history = [{ ...data.goals[0], id: 'e'.repeat(32), archived: true, status: 'completed' }];
+  receive({ data: { type: 'goal-state', state: data } });
+  const del = collect(byId('history'), node => node.tag === 'button' && node.textContent === '彻底删除')[0];
+  assert.ok(del);
+  del.onclick();
+  const posted = posts.find(post => post.type === 'goal.remove');
+  assert.equal(posted.payload.id, 'e'.repeat(32));
+});
+
 test('the edit button opens an in-place editor that posts goal.updateObjective', () => {
   const { byId, posts, receive } = webview();
   receive({ data: { type: 'goal-state', state: state() } });
@@ -304,7 +316,8 @@ function host({ confirmAnswer = '确认', snapshot = state(), limitAnswer = unde
     setMaxRuns: payload => { calls.push(['setMaxRuns', payload]); return {}; },
     updateObjective: payload => { calls.push(['updateObjective', payload]); return {}; },
     accept: payload => { calls.push(['accept', payload]); return {}; },
-    archive: payload => { calls.push(['archive', payload]); return {}; }
+    archive: payload => { calls.push(['archive', payload]); return {}; },
+    remove: payload => { calls.push(['remove', payload]); return {}; }
   };
   const commands = new Map();
   const handle = createGoalUi({
@@ -391,6 +404,19 @@ test('force archive always asks the host for confirmation and passes force to th
   const confirmed = host();
   await confirmed.receive({ type: 'goal.forceArchive', id: '1', payload: { id: 'a'.repeat(32) } });
   assert.deepEqual(confirmed.calls, [['archive', { id: 'a'.repeat(32), force: true }]]);
+  assert.equal(confirmed.warnings.length, 1);
+  confirmed.handle.dispose();
+});
+
+test('removing a history entry always asks the host for confirmation first', async () => {
+  const declined = host({ confirmAnswer: null });
+  await declined.receive({ type: 'goal.remove', id: '1', payload: { id: 'a'.repeat(32) }, confirm: true });
+  assert.equal(declined.calls.length, 0);
+  assert.equal(declined.warnings.length, 1);
+  declined.handle.dispose();
+  const confirmed = host();
+  await confirmed.receive({ type: 'goal.remove', id: '1', payload: { id: 'a'.repeat(32) } });
+  assert.deepEqual(confirmed.calls, [['remove', { id: 'a'.repeat(32) }]]);
   assert.equal(confirmed.warnings.length, 1);
   confirmed.handle.dispose();
 });

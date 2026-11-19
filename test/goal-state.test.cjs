@@ -486,6 +486,19 @@ test('force archive bypasses a foreign lock, moves the goal to history and drops
   assert.throws(() => other.archive({ id: goal.id, force: true }), /已经归档/);
 });
 
+test('remove deletes an archived goal from history and rejects goals that are still active', async t => {
+  const h = await started(t);
+  const goal = h.goal();
+  assert.throws(() => h.controller.remove({ id: goal.id }), /已归档/);
+  h.controller.archive({ id: goal.id });
+  assert.equal(h.controller.snapshot().history.length, 1);
+  const removed = h.controller.remove({ id: goal.id });
+  assert.equal(removed.removed, true);
+  assert.equal(h.controller.snapshot().history.length, 0);
+  assert.equal(store.readGoalById(h.root, goal.id), null);
+  assert.throws(() => h.controller.remove({ id: goal.id }), /已不存在/);
+});
+
 test('a lock-free review goal can be explicitly reclaimed by a human action after restart', async t => {
   const h = await started(t);
   const goal = h.goal();

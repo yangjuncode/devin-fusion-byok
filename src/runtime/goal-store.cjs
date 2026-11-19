@@ -279,6 +279,21 @@ function archiveGoal(root, record) {
   if (active && !removeFile(goalFile(root, record.sessionId))) throw new Error('goal_record_conflict');
   return { record, published };
 }
+function removeHistory(root, id) {
+  const clean = goalId(id);
+  if (!clean) return false;
+  const directory = safeReadDirectory(root, 'history');
+  if (directory === null) return false;
+  const file = path.join(directory, clean + '.json');
+  let record = null;
+  try { record = readJsonFile(file); } catch {}
+  if (!removeFile(file)) return false;
+  if (record && Array.isArray(record.evidence)) {
+    for (const entry of record.evidence) if (runId(entry?.runId)) removeReport(root, entry.runId);
+  }
+  removeCapabilitiesForGoal(root, clean);
+  return true;
+}
 
 function capabilitiesOfGoal(root, id) {
   const clean = goalId(id);
@@ -439,7 +454,7 @@ module.exports = {
   reportsDirectory, locksDirectory, historyDirectory, goalFile, capabilityFile, reportFile, lockFile, safeDirectory,
   safeReadDirectory, readJsonFile, writeAtomic, publishExclusive, removeFile, listDirectory, normalizeEvidence,
   normalizeObjective, normalizeCriteria, normalizeReason, normalizeMaxRuns, normalizeRetryPolicy, isReportStatus, isGoalStatus,
-  validGoalRecord, readGoal, scanGoals, scanHistory, listGoals, readGoalById, writeGoal, archiveGoal,
+  validGoalRecord, readGoal, scanGoals, scanHistory, listGoals, readGoalById, writeGoal, archiveGoal, removeHistory,
   issueCapability, readCapability, removeCapability, removeCapabilitiesExcept, removeCapabilitiesForGoal,
   removeCapabilitiesForRun, writeReport, readReport, removeReport, isProcessAlive, readOwnership, acquireOwnership,
   releaseOwnership, dropOwnership, MAX_GOALS, MAX_HISTORY

@@ -94,7 +94,10 @@ item.append(actions);list.append(item);}
 if(editGoalId&&!(state.goals||[]).some(g=>g.id===editGoalId)){editGoalId='';editDraft='';editSaving='';editRendered=false;}
 editFocus=hadEditFocus;
 const history=el('history');history.replaceChildren();
-for(const goal of state.history||[]){const line=document.createElement('pre');line.textContent='['+goal.status+'] '+sessionLabel(goal.sessionId)+' · 修订 '+goal.revision+'\\n'+goal.objective;history.append(line);}
+for(const goal of state.history||[]){const item=document.createElement('div');item.className='goal';
+const line=document.createElement('pre');line.textContent='['+goal.status+'] '+sessionLabel(goal.sessionId)+' · 修订 '+goal.revision+'\\n'+goal.objective;
+const del=document.createElement('button');del.textContent='彻底删除';del.title='删除该条历史记录及其残留的报告与凭据，不可恢复';
+del.onclick=()=>send('goal.remove',{id:goal.id},true);item.append(line,del);history.append(item);}
 if(refocus){refocus.focus();try{refocus.setSelectionRange(refocus.value.length,refocus.value.length);}catch{}}}
 function send(type,payload,needsConfirm){const id=String(Math.random());errorText='';notice='';el('error').textContent='';el('notice').textContent='';
 vscode.postMessage({type,id,payload,confirm:needsConfirm===true});return id;}
@@ -184,6 +187,9 @@ function createGoalUi({ vscode, context, controller, isEnabled = () => true, isT
       } else if (message.type === 'goal.forceArchive') {
         if (!(await confirm('该目标由另一个窗口或进程持有。若持有方仍在运行会被一并中断，请仅在持有方已退出时使用。确认强制归档并解除占用？'))) return;
         result = controller.archive({ id: payload.id, force: true });
+      } else if (message.type === 'goal.remove') {
+        if (!(await confirm('彻底删除该条历史记录及其残留数据？此操作不可恢复。'))) return;
+        result = controller.remove(payload);
       } else return;
       await target.webview.postMessage({ type: 'goal-result', id: message.id, ok: true });
       await target.webview.postMessage({ type: 'goal-state', state: state() });

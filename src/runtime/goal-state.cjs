@@ -738,6 +738,18 @@ function createGoalController({
       if (force === true) store.dropOwnership(root, record.sessionId);
       return archived;
     },
+    remove({ id } = {}) {
+      const record = goalOf(id);
+      if (record.archivedAt === null) throw goalError('not-archived', '只有已归档的目标才能删除。');
+      try {
+        if (!store.removeHistory(root, record.id)) throw new Error('goal_record_missing');
+      } catch (error) {
+        storeError = error.message;
+        throw goalError('store-write-failed', '历史记录删除失败。');
+      }
+      report('goal-history-removed', {});
+      return { ...record, removed: true };
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
