@@ -706,3 +706,59 @@ test('setMaxRuns refuses archived goals', async t => {
   h.controller.archive({ id: goal.id });
   assert.throws(() => h.controller.setMaxRuns({ id: goal.id, maxRuns: 50 }), /归档/);
 });
+
+test('updateObjective rewrites the goal text in place for a running goal', async t => {
+  const h = await started(t);
+  const updated = h.controller.updateObjective({ id: h.goal().id, objective: 'revised target' });
+  assert.equal(updated.objective, 'revised target');
+  assert.equal(h.goal().objective, 'revised target');
+  assert.equal(h.goal().status, 'active');
+  assert.equal(h.goal().criteria, 'tests pass');
+  assert.ok(h.logs.some(entry => entry.event === 'goal-objective-updated'));
+});
+
+test('updateObjective rewrites criteria that mirrored the old objective', async t => {
+  const h = harness(t);
+  h.sessions.set('session-1', 'idle');
+  h.controller.handleCommand({ sessionId: 'session-1', action: 'start', text: 'old text', connected: true });
+  await tick();
+  h.controller.updateObjective({ id: h.goal().id, objective: 'new text' });
+  assert.equal(h.goal().objective, 'new text');
+  assert.equal(h.goal().criteria, 'new text');
+});
+
+test('an edited objective is used by the next dispatched run', async t => {
+  const h = await started(t);
+  const run = activeRun(h);
+  h.controller.updateObjective({ id: h.goal().id, objective: 'adjusted objective' });
+  h.report(h.tokenOf(), { status: 'progress', evidence: 'one' });
+  h.emit({ sessionId: 'session-1', type: 'idle', runId: run, stopReason: 'end_turn' });
+  h.scheduler.advance(1500);
+  await tick();
+  assert.equal(h.dispatched.length, 2);
+  assert.match(h.dispatched[1].prompt, /adjusted objective/);
+});
+
+test('editing the objective does not invalidate an in-flight run report', async t => {
+  const h = await started(t);
+  const run = activeRun(h);
+  const revision = h.goal().revision;
+  h.controller.updateObjective({ id: h.goal().id, objective: 'adjusted' });
+  assert.equal(h.goal().revision, revision);
+  assert.equal(h.report(h.tokenOf(), { status: 'progress', evidence: 'done slice' }).ok, true);
+  h.emit({ sessionId: 'session-1', type: 'idle', runId: run, stopReason: 'end_turn' });
+  assert.equal(h.goal().evidence.length, 1);
+  assert.equal(h.goal().status, 'active');
+});
+
+test('updateObjective validates text and refuses terminal goals', async t => {
+  const h = await started(t);
+  const id = h.goal().id;
+  assert.throws(() => h.controller.updateObjective({ id, objective: '' }), /目标描述/);
+  assert.throws(() => h.controller.updateObjective({ id }), /目标描述/);
+  assert.throws(() => h.controller.updateObjective({ id, objective: 'x'.repeat(4001) }), /目标描述/);
+  assert.throws(() => h.controller.updateObjective({ id: 'a'.repeat(32), objective: 'ok' }), /不存在/);
+  h.controller.pause({ id });
+  h.controller.archive({ id });
+  assert.throws(() => h.controller.updateObjective({ id, objective: 'ok' }), /归档/);
+});

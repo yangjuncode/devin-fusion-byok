@@ -11,6 +11,8 @@ class Element {
   }
   append(...children) { for (const child of children) if (child != null) this.children.push(child); }
   replaceChildren(...children) { this.children = children; }
+  focus() {}
+  setSelectionRange() {}
   setAttribute(key, value) { this.attributes[key] = value; }
   getAttribute(key) { return this.attributes[key]; }
   addEventListener(name, listener) { this.listeners[name] = listener; }
@@ -143,6 +145,66 @@ test('locked, archived and completed goals render the limit as plain text', () =
   assert.equal(collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-maxruns')).length, 0);
   const texts = collect(byId('goals'), node => node.className === 'meta').map(node => node.textContent).join('\n');
   assert.equal((texts.match(/2 \/ 5/g) || []).length, 3);
+  assert.equal(collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑').length, 0);
+});
+
+test('the edit button opens an in-place editor that posts goal.updateObjective', () => {
+  const { byId, posts, receive } = webview();
+  receive({ data: { type: 'goal-state', state: state() } });
+  const edit = collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑')[0];
+  assert.ok(edit);
+  edit.onclick();
+  const editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  assert.ok(editor);
+  assert.equal(editor.value, '<img onerror=boom>');
+  editor.value = 'revised goal';
+  editor.oninput();
+  const save = collect(byId('goals'), node => node.tag === 'button' && node.textContent === '保存')[0];
+  save.onclick();
+  const posted = posts.find(post => post.type === 'goal.updateObjective');
+  assert.equal(posted.payload.id, 'a'.repeat(32));
+  assert.equal(posted.payload.objective, 'revised goal');
+});
+
+test('the objective editor keeps the draft across refreshes and closes on a successful save', () => {
+  const { byId, posts, receive } = webview();
+  receive({ data: { type: 'goal-state', state: state() } });
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑')[0].onclick();
+  let editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  editor.value = 'draft tweaks';
+  editor.oninput();
+  receive({ data: { type: 'goal-state', state: state() } });
+  editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  assert.equal(editor.value, 'draft tweaks');
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '保存')[0].onclick();
+  const posted = posts.find(post => post.type === 'goal.updateObjective');
+  receive({ data: { type: 'goal-result', id: posted.id, ok: true } });
+  assert.equal(collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit')).length, 0);
+});
+
+test('a failed save keeps the editor open with the draft intact', () => {
+  const { byId, posts, receive } = webview();
+  receive({ data: { type: 'goal-state', state: state() } });
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑')[0].onclick();
+  const editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  editor.value = 'draft tweaks';
+  editor.oninput();
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '保存')[0].onclick();
+  const posted = posts.find(post => post.type === 'goal.updateObjective');
+  receive({ data: { type: 'goal-result', id: posted.id, ok: false, error: '目标描述无效。' } });
+  const kept = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  assert.equal(kept.value, 'draft tweaks');
+  assert.equal(byId('error').textContent, '目标描述无效。');
+});
+
+test('cancelling the objective editor restores the read-only text', () => {
+  const { byId, receive } = webview();
+  receive({ data: { type: 'goal-state', state: state() } });
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑')[0].onclick();
+  collect(byId('goals'), node => node.tag === 'button' && node.textContent === '取消')[0].onclick();
+  assert.equal(collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit')).length, 0);
+  const texts = collect(byId('goals'), node => node.tag === 'pre').map(node => node.textContent).join('\n');
+  assert.ok(texts.includes('目标：<img onerror=boom>'));
 });
 
 test('the goal webview shows untrusted and disabled states from the host snapshot', () => {
@@ -215,6 +277,7 @@ function host({ confirmAnswer = '确认', snapshot = state(), limitAnswer = unde
     pause: payload => { calls.push(['pause', payload]); return {}; },
     resume: payload => { calls.push(['resume', payload]); return {}; },
     setMaxRuns: payload => { calls.push(['setMaxRuns', payload]); return {}; },
+    updateObjective: payload => { calls.push(['updateObjective', payload]); return {}; },
     accept: payload => { calls.push(['accept', payload]); return {}; },
     archive: payload => { calls.push(['archive', payload]); return {}; }
   };
@@ -245,15 +308,17 @@ test('the host handles ready and refresh, answering with an id-less state post',
   h.handle.dispose();
 });
 
-test('the host dispatches start, pause, resume, setMaxRuns and archive to the controller', async () => {
+test('the host dispatches start, pause, resume, setMaxRuns, updateObjective and archive to the controller', async () => {
   const h = host();
   await h.receive({ type: 'goal.start', id: '1', payload: { sessionId: 's', objective: 'o', criteria: 'c' } });
   await h.receive({ type: 'goal.pause', id: '2', payload: { id: 'g' } });
   await h.receive({ type: 'goal.resume', id: '3', payload: { id: 'g' } });
   await h.receive({ type: 'goal.setMaxRuns', id: '4', payload: { id: 'g', maxRuns: 30 } });
   await h.receive({ type: 'goal.archive', id: '5', payload: { id: 'g' } });
-  assert.deepEqual(h.calls.map(call => call[0]), ['start', 'pause', 'resume', 'setMaxRuns', 'archive']);
+  await h.receive({ type: 'goal.updateObjective', id: '6', payload: { id: 'g', objective: 'revised' } });
+  assert.deepEqual(h.calls.map(call => call[0]), ['start', 'pause', 'resume', 'setMaxRuns', 'archive', 'updateObjective']);
   assert.deepEqual(h.calls.find(call => call[0] === 'setMaxRuns')[1], { id: 'g', maxRuns: 30 });
+  assert.deepEqual(h.calls.find(call => call[0] === 'updateObjective')[1], { id: 'g', objective: 'revised' });
   assert.ok(h.posts.some(message => message.type === 'goal-result' && message.ok === true));
   h.handle.dispose();
 });

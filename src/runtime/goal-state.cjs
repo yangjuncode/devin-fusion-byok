@@ -685,6 +685,20 @@ function createGoalController({
       report('goal-max-runs-updated', { maxRuns: requested });
       return readById(record.id) || record;
     },
+    updateObjective({ id, objective } = {}) {
+      const found = goalOf(id);
+      if (found.archivedAt !== null) throw goalError('archived', '已归档的目标不能修改目标文本。');
+      if (found.status === 'completed') throw goalError('completed', '已完成的目标不能修改目标文本。');
+      const objectiveText = store.normalizeObjective(objective);
+      if (!objectiveText) throw goalError('invalid-objective', '目标描述必须是 1 到 ' + store.MAX_OBJECTIVE_LENGTH + ' 字符的文本。');
+      const record = reclaim(found);
+      if (objectiveText === record.objective) return record;
+      if (record.criteria === record.objective) record.criteria = objectiveText;
+      record.objective = objectiveText;
+      if (!persist(record)) throw goalError('store-write-failed', '目标状态写入失败。');
+      report('goal-objective-updated', {});
+      return readById(record.id) || record;
+    },
     suspend({ reason = 'suspended' } = {}) {
       let paused = 0;
       for (const record of ownedRecords()) {

@@ -26,7 +26,7 @@ function statusText(goal) {
 }
 
 function goalScript() {
-  return `const vscode=acquireVsCodeApi();let state=null,errorText='',notice='',sessions=[],selectedSession='';
+  return `const vscode=acquireVsCodeApi();let state=null,errorText='',notice='',sessions=[],selectedSession='',editGoalId='',editDraft='',editFocus=false,editSaving='';
 const STATUS_LABELS=${JSON.stringify(STATUS_LABELS)},REASON_LABELS=${JSON.stringify(REASON_LABELS)},SESSION_LABELS=${JSON.stringify(SESSION_LABELS)};
 const el=id=>document.getElementById(id);
 function statusText(goal){const base=STATUS_LABELS[goal.status]||goal.status;
@@ -41,7 +41,8 @@ el('storeError').textContent=state.storeError?('状态存储问题：'+state.sto
 el('corrupt').textContent=state.corruptGoals?('发现 '+state.corruptGoals+' 条无法解析的目标记录，已保留未覆盖。'):'';
 el('error').textContent=errorText;el('notice').textContent=notice;
 sessions=state.sessions||[];
-const focused=document.activeElement,editingMax=focused&&typeof focused.getAttribute==='function'?focused.getAttribute('data-maxruns')||'':'',editingValue=editingMax?focused.value:'';
+const focused=document.activeElement,editingMax=focused&&typeof focused.getAttribute==='function'?focused.getAttribute('data-maxruns')||'':'',editingValue=editingMax?focused.value:'',
+hadEditFocus=!!(focused&&typeof focused.getAttribute==='function'&&focused.getAttribute('data-objective-edit'));
 let refocus=null;
 const list=el('goals');list.replaceChildren();
 for(const goal of state.goals||[]){const item=document.createElement('div');item.className='goal';
@@ -58,7 +59,23 @@ send('goal.setMaxRuns',{id:goal.id,maxRuns:value});};
 meta.append(maxInput,document.createTextNode(metaTail));
 }else meta.textContent='运行额度已使用 '+goal.runsStarted+' / '+goal.maxRuns+metaTail;
 item.append(meta);
-const objective=document.createElement('pre');objective.textContent='目标：'+goal.objective+(goal.criteria&&goal.criteria!==goal.objective?'\\n验收标准：'+goal.criteria:'');item.append(objective);
+const objectiveWrap=document.createElement('div');objectiveWrap.className='objective';
+const editable=!goal.locked&&!goal.archived&&goal.status!=='completed';
+if(editable&&editGoalId===goal.id){const editor=document.createElement('textarea');editor.className='objectiveedit';
+editor.setAttribute('data-objective-edit','1');editor.value=editDraft;editor.oninput=()=>{editDraft=editor.value;};
+const editRow=document.createElement('div');editRow.className='actions';
+const save=document.createElement('button');save.textContent='保存';
+save.onclick=()=>{editSaving=send('goal.updateObjective',{id:goal.id,objective:editor.value});};
+const cancel=document.createElement('button');cancel.textContent='取消';
+cancel.onclick=()=>{editGoalId='';editDraft='';editFocus=false;editSaving='';render();};
+editRow.append(save,cancel);objectiveWrap.append(editor,editRow);if(editFocus||hadEditFocus)refocus=editor;}
+else{const objective=document.createElement('pre');
+objective.textContent='目标：'+goal.objective+(goal.criteria&&goal.criteria!==goal.objective?'\\n验收标准：'+goal.criteria:'');
+objectiveWrap.append(objective);
+if(editable){const editButton=document.createElement('button');editButton.className='editgoal';editButton.textContent='编辑';
+editButton.title='修改目标文本，下一次运行时生效';editButton.onclick=()=>{editGoalId=goal.id;editDraft=goal.objective;editFocus=true;render();};
+objectiveWrap.append(editButton);}else if(editGoalId===goal.id){editGoalId='';editDraft='';editSaving='';}}
+item.append(objectiveWrap);
 const evidence=document.createElement('div');evidence.className='evidence';
 if(!goal.evidence.length)evidence.textContent='尚无证据。';
 for(const entry of goal.evidence){const line=document.createElement('pre');line.textContent='['+entry.status+'] '+entry.evidence;evidence.append(line);}
@@ -71,20 +88,23 @@ else if(!goal.archived&&goal.status!=='completed')act('goal.resume','恢复',{},
 if(goal.status==='review')act('goal.accept','验收完成',{},true);
 if(!goal.archived)act('goal.archive','归档',{},goal.status==='active');}
 item.append(actions);list.append(item);}
+if(editGoalId&&!(state.goals||[]).some(g=>g.id===editGoalId)){editGoalId='';editDraft='';editSaving='';}
+editFocus=hadEditFocus;
 const history=el('history');history.replaceChildren();
 for(const goal of state.history||[]){const line=document.createElement('pre');line.textContent='['+goal.status+'] '+sessionLabel(goal.sessionId)+' · 修订 '+goal.revision+'\\n'+goal.objective;history.append(line);}
 if(refocus){refocus.focus();try{refocus.setSelectionRange(refocus.value.length,refocus.value.length);}catch{}}}
 function send(type,payload,needsConfirm){const id=String(Math.random());errorText='';notice='';el('error').textContent='';el('notice').textContent='';
-vscode.postMessage({type,id,payload,confirm:needsConfirm===true});}
+vscode.postMessage({type,id,payload,confirm:needsConfirm===true});return id;}
 window.addEventListener('message',event=>{const data=event.data;if(!data)return;
 if(data.type==='goal-state'){state=data.state;render();return;}
-if(data.type==='goal-result'){if(!data.ok){errorText=data.error||'操作失败。';}else{notice=data.notice||'';}render();}});
+if(data.type==='goal-result'){if(!data.ok){errorText=data.error||'操作失败。';if(editSaving===data.id)editSaving='';}
+else{notice=data.notice||'';if(editGoalId&&editSaving&&editSaving===data.id){editGoalId='';editDraft='';editFocus=false;editSaving='';}}render();}});
 el('refresh').onclick=()=>send('goal.refresh',{});
 vscode.postMessage({type:'goal.ready',id:String(Math.random()),payload:{}});`;
 }
 
 function goalHtml(nonce) {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:20px;line-height:1.7}label{display:block;margin-top:12px}input,textarea,select{width:100%;box-sizing:border-box;padding:6px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent)}textarea{min-height:70px}.goal{border:1px solid var(--vscode-panel-border,#555);padding:12px;margin-top:12px}.goalhead{font-weight:600}.meta{opacity:.8}.actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}button{padding:5px 10px;cursor:pointer}.error{color:var(--vscode-errorForeground)}.notice{color:var(--vscode-descriptionForeground)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:6px 0}.hint{opacity:.7}.evidence{border-left:2px solid var(--vscode-panel-border,#555);padding-left:8px;margin-top:6px}input.maxruns{width:5.5em;min-height:0;padding:2px 4px}</style></head><body><h2>Fusion BYOK Goal</h2><p class="hint">在 Devin 聊天框输入 <b>/goal 要达成的目标</b> 即可在当前对话启动，模型会一轮轮自动推进，直到它提交带证据的完成报告。<br>/goal 查看进度 · /goal pause 暂停 · /goal resume 继续 · /goal clear 清除。这里只用于查看和管理。</p><p>插件：<span id="enabled">未知</span> · <span id="trusted">未知</span></p><p id="storeError" class="error" role="status"></p><p id="corrupt" class="error" role="status"></p><div class="actions"><button id="refresh">刷新</button></div><p id="error" class="error" role="status"></p><p id="notice" class="notice" role="status"></p><div id="goals"></div><h3>历史（已归档）</h3><div id="history"></div><script nonce="${nonce}">${goalScript()}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:20px;line-height:1.7}label{display:block;margin-top:12px}input,textarea,select{width:100%;box-sizing:border-box;padding:6px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent)}textarea{min-height:70px}.goal{border:1px solid var(--vscode-panel-border,#555);padding:12px;margin-top:12px}.goalhead{font-weight:600}.meta{opacity:.8}.actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}button{padding:5px 10px;cursor:pointer}.error{color:var(--vscode-errorForeground)}.notice{color:var(--vscode-descriptionForeground)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:6px 0}.hint{opacity:.7}.evidence{border-left:2px solid var(--vscode-panel-border,#555);padding-left:8px;margin-top:6px}input.maxruns{width:5.5em;min-height:0;padding:2px 4px}.objective{display:flex;gap:8px;align-items:flex-start}.objective pre{flex:1;min-width:0}.objective .editgoal{flex-shrink:0;margin-top:6px;padding:2px 8px}.objective .objectiveedit{flex:1;min-width:0}.objective .actions{flex-shrink:0;margin-top:0}</style></head><body><h2>Fusion BYOK Goal</h2><p class="hint">在 Devin 聊天框输入 <b>/goal 要达成的目标</b> 即可在当前对话启动，模型会一轮轮自动推进，直到它提交带证据的完成报告。<br>/goal 查看进度 · /goal pause 暂停 · /goal resume 继续 · /goal clear 清除。这里只用于查看和管理。</p><p>插件：<span id="enabled">未知</span> · <span id="trusted">未知</span></p><p id="storeError" class="error" role="status"></p><p id="corrupt" class="error" role="status"></p><div class="actions"><button id="refresh">刷新</button></div><p id="error" class="error" role="status"></p><p id="notice" class="notice" role="status"></p><div id="goals"></div><h3>历史（已归档）</h3><div id="history"></div><script nonce="${nonce}">${goalScript()}</script></body></html>`;
 }
 
 function createGoalUi({ vscode, context, controller, isEnabled = () => true, isTrusted = () => true, safeError = () => ({ message: '操作失败。' }) }) {
@@ -149,6 +169,8 @@ function createGoalUi({ vscode, context, controller, isEnabled = () => true, isT
         result = controller.resume(payload);
       } else if (message.type === 'goal.setMaxRuns') {
         result = controller.setMaxRuns(payload);
+      } else if (message.type === 'goal.updateObjective') {
+        result = controller.updateObjective(payload);
       } else if (message.type === 'goal.accept') {
         if (!(await confirm('确认把该目标标记为已完成？只有待验收状态且已有证据的目标可以验收。'))) return;
         result = controller.accept(payload);
