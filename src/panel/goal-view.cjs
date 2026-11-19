@@ -26,7 +26,7 @@ function statusText(goal) {
 }
 
 function goalScript() {
-  return `const vscode=acquireVsCodeApi();let state=null,errorText='',notice='',sessions=[],selectedSession='',editGoalId='',editDraft='',editFocus=false,editSaving='';
+  return `const vscode=acquireVsCodeApi();let state=null,errorText='',notice='',sessions=[],selectedSession='',editGoalId='',editDraft='',editFocus=false,editSaving='',editRendered=false;
 const STATUS_LABELS=${JSON.stringify(STATUS_LABELS)},REASON_LABELS=${JSON.stringify(REASON_LABELS)},SESSION_LABELS=${JSON.stringify(SESSION_LABELS)};
 const el=id=>document.getElementById(id);
 function statusText(goal){const base=STATUS_LABELS[goal.status]||goal.status;
@@ -41,6 +41,8 @@ el('storeError').textContent=state.storeError?('状态存储问题：'+state.sto
 el('corrupt').textContent=state.corruptGoals?('发现 '+state.corruptGoals+' 条无法解析的目标记录，已保留未覆盖。'):'';
 el('error').textContent=errorText;el('notice').textContent=notice;
 sessions=state.sessions||[];
+if(editGoalId&&editRendered)return;
+editRendered=false;
 const focused=document.activeElement,editingMax=focused&&typeof focused.getAttribute==='function'?focused.getAttribute('data-maxruns')||'':'',editingValue=editingMax?focused.value:'',
 hadEditFocus=!!(focused&&typeof focused.getAttribute==='function'&&focused.getAttribute('data-objective-edit'));
 let refocus=null;
@@ -67,14 +69,14 @@ const editRow=document.createElement('div');editRow.className='actions';
 const save=document.createElement('button');save.textContent='保存';
 save.onclick=()=>{editSaving=send('goal.updateObjective',{id:goal.id,objective:editor.value});};
 const cancel=document.createElement('button');cancel.textContent='取消';
-cancel.onclick=()=>{editGoalId='';editDraft='';editFocus=false;editSaving='';render();};
-editRow.append(save,cancel);objectiveWrap.append(editor,editRow);if(editFocus||hadEditFocus)refocus=editor;}
+cancel.onclick=()=>{editGoalId='';editDraft='';editFocus=false;editSaving='';editRendered=false;render();};
+editRow.append(save,cancel);objectiveWrap.append(editor,editRow);editRendered=true;if(editFocus||hadEditFocus)refocus=editor;}
 else{const objective=document.createElement('pre');
 objective.textContent='目标：'+goal.objective+(goal.criteria&&goal.criteria!==goal.objective?'\\n验收标准：'+goal.criteria:'');
 objectiveWrap.append(objective);
 if(editable){const editButton=document.createElement('button');editButton.className='editgoal';editButton.textContent='编辑';
 editButton.title='修改目标文本，下一次运行时生效';editButton.onclick=()=>{editGoalId=goal.id;editDraft=goal.objective;editFocus=true;render();};
-objectiveWrap.append(editButton);}else if(editGoalId===goal.id){editGoalId='';editDraft='';editSaving='';}}
+objectiveWrap.append(editButton);}else if(editGoalId===goal.id){editGoalId='';editDraft='';editSaving='';editRendered=false;}}
 item.append(objectiveWrap);
 const evidence=document.createElement('div');evidence.className='evidence';
 if(!goal.evidence.length)evidence.textContent='尚无证据。';
@@ -88,7 +90,7 @@ else if(!goal.archived&&goal.status!=='completed')act('goal.resume','恢复',{},
 if(goal.status==='review')act('goal.accept','验收完成',{},true);
 if(!goal.archived)act('goal.archive','归档',{},goal.status==='active');}
 item.append(actions);list.append(item);}
-if(editGoalId&&!(state.goals||[]).some(g=>g.id===editGoalId)){editGoalId='';editDraft='';editSaving='';}
+if(editGoalId&&!(state.goals||[]).some(g=>g.id===editGoalId)){editGoalId='';editDraft='';editSaving='';editRendered=false;}
 editFocus=hadEditFocus;
 const history=el('history');history.replaceChildren();
 for(const goal of state.history||[]){const line=document.createElement('pre');line.textContent='['+goal.status+'] '+sessionLabel(goal.sessionId)+' · 修订 '+goal.revision+'\\n'+goal.objective;history.append(line);}
@@ -98,7 +100,7 @@ vscode.postMessage({type,id,payload,confirm:needsConfirm===true});return id;}
 window.addEventListener('message',event=>{const data=event.data;if(!data)return;
 if(data.type==='goal-state'){state=data.state;render();return;}
 if(data.type==='goal-result'){if(!data.ok){errorText=data.error||'操作失败。';if(editSaving===data.id)editSaving='';}
-else{notice=data.notice||'';if(editGoalId&&editSaving&&editSaving===data.id){editGoalId='';editDraft='';editFocus=false;editSaving='';}}render();}});
+else{notice=data.notice||'';if(editGoalId&&editSaving&&editSaving===data.id){editGoalId='';editDraft='';editFocus=false;editSaving='';editRendered=false;}}render();}});
 el('refresh').onclick=()=>send('goal.refresh',{});
 vscode.postMessage({type:'goal.ready',id:String(Math.random()),payload:{}});`;
 }

@@ -170,11 +170,12 @@ test('the objective editor keeps the draft across refreshes and closes on a succ
   const { byId, posts, receive } = webview();
   receive({ data: { type: 'goal-state', state: state() } });
   collect(byId('goals'), node => node.tag === 'button' && node.textContent === '编辑')[0].onclick();
-  let editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
-  editor.value = 'draft tweaks';
-  editor.oninput();
+  const opened = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  opened.value = 'draft tweaks';
+  opened.oninput();
   receive({ data: { type: 'goal-state', state: state() } });
-  editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  const editor = collect(byId('goals'), node => typeof node.getAttribute === 'function' && node.getAttribute('data-objective-edit'))[0];
+  assert.equal(editor, opened);
   assert.equal(editor.value, 'draft tweaks');
   collect(byId('goals'), node => node.tag === 'button' && node.textContent === '保存')[0].onclick();
   const posted = posts.find(post => post.type === 'goal.updateObjective');
