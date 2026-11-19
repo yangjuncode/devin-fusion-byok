@@ -160,6 +160,25 @@ test('the goal panel posts state on ready and dispatches start through the real 
   await f.deactivate();
 });
 
+test('the goal panel forwards objective edits through the real controller', async t => {
+  const f = fixture(t);
+  await f.activate(f.context);
+  await f.settle();
+  f.api.registerConnection(f.connector);
+  await f.connector.sendRequest({ method: 'session/new', params: { sessionId: 's1' } });
+  f.connector.forwardClientRequest({ method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'state_update', state: 'idle' } } });
+  await f.commands.get('devinFusionByok.goal')();
+  await f.settle();
+  await f.receive({ type: 'goal.start', id: 'a', payload: { sessionId: 's1', objective: 'old text', criteria: 'old text' } });
+  const goalId = f.posts.filter(entry => entry.message.type === 'goal-state').at(-1).message.state.goals[0].id;
+  await f.receive({ type: 'goal.updateObjective', id: 'b', payload: { id: goalId, objective: 'new text' } });
+  const result = f.posts.map(entry => entry.message).find(message => message.type === 'goal-result' && message.id === 'b');
+  assert.equal(result.ok, true);
+  const snapshot = f.posts.filter(entry => entry.message.type === 'goal-state').at(-1).message.state;
+  assert.equal(snapshot.goals[0].objective, 'new text');
+  await f.deactivate();
+});
+
 test('an invalid start reports an error to the webview and creates no goal', async t => {
   const f = fixture(t);
   await f.activate(f.context);

@@ -497,6 +497,7 @@ async function activate(context) {
         pause: payload => goalController.pause(payload),
         resume: payload => goalController.resume(payload),
         setMaxRuns: payload => goalController.setMaxRuns(payload),
+        updateObjective: payload => goalController.updateObjective(payload),
         accept: payload => goalController.accept(payload),
         archive: payload => goalController.archive(payload)
       },
