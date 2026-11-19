@@ -499,7 +499,8 @@ async function activate(context) {
         setMaxRuns: payload => goalController.setMaxRuns(payload),
         updateObjective: payload => goalController.updateObjective(payload),
         accept: payload => goalController.accept(payload),
-        archive: payload => goalController.archive(payload)
+        archive: payload => goalController.archive(payload),
+        remove: payload => goalController.remove(payload)
       },
       isEnabled: () => !activationDisposed && config().enabled !== false,
       isTrusted: () => vscode.workspace.isTrusted !== false,
