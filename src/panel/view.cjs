@@ -577,7 +577,7 @@ function panelClient(modelSupportsImages, vscode) {
         }),
         element('div', { class: 'model-text' },
           element('span', { class: 'model-title', text: '目标默认运行上限' }),
-          element('span', { class: 'hint', text: '通过 /goal 启动目标时使用的默认运行轮数，范围 1-100，默认 10。只影响之后启动的目标；已在运行的目标可在 Goal 面板中单独调整上限。' }))),
+          element('span', { class: 'hint', text: '通过 /fusion-goal 启动目标时使用的默认运行轮数，范围 1-100，默认 10。只影响之后启动的目标；已在运行的目标可在 Goal 面板中单独调整上限。' }))),
       element('label', { class: 'model-label space-top' },
         element('input', {
           type: 'number',

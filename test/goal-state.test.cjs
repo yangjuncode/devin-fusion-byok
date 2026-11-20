@@ -771,7 +771,7 @@ test('report command quotes paths safely and carries no other goal secret', asyn
   assert.match(prompt, /--capability '[a-f0-9]{64}'/);
   assert.match(prompt, /'{"status":"progress","evidence":"[^"]*"}'/);
 });
-test('the configured default maxRuns applies to goals started via /goal', async t => {
+test('the configured default maxRuns applies to goals started via /fusion-goal', async t => {
   const h = harness(t, { defaultMaxRuns: () => 42 });
   h.sessions.set('session-1', 'idle');
   const result = h.controller.handleCommand({ sessionId: 'session-1', action: 'start', text: 'finish the feature', connected: true });

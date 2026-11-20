@@ -71,9 +71,9 @@ function fixture(t, protocolVersion) {
 
 for (const protocol of [1, 2]) {
   for (const status of ['waiting', 'blocked']) {
-    test(`v${protocol}: ${status} requires a new ordinary user turn, never repeated idle or /goal status`, async t => {
+    test(`v${protocol}: ${status} requires a new ordinary user turn, never repeated idle or /fusion-goal status`, async t => {
       const h = fixture(t, protocol);
-      const start = h.send('/goal finish the task');
+      const start = h.send('/fusion-goal finish the task');
       h.submit(status);
       await h.finish();
       await start;
@@ -82,7 +82,7 @@ for (const protocol of [1, 2]) {
       await h.flushTimers();
       assert.equal(h.goal().status, status);
       assert.equal(h.prompts(), 1);
-      const query = h.send('/goal status');
+      const query = h.send('/fusion-goal status');
       await h.finish();
       await query;
       h.state('idle');
@@ -110,13 +110,13 @@ for (const protocol of [1, 2]) {
 
   test(`v${protocol}: command reply cannot finish an existing Goal and pause still sends cancellation`, async t => {
     const h = fixture(t, protocol);
-    const start = h.send('/goal finish the task');
+    const start = h.send('/fusion-goal finish the task');
     // The request remains live while the command-only reply completes.
     if (protocol === 2) { await start; h.state('running'); }
     const run = h.goal().activeRun;
     h.submit('progress');
     let queryResolved = false;
-    const query = h.send('/goal status').then(response => { queryResolved = true; return response; });
+    const query = h.send('/fusion-goal status').then(response => { queryResolved = true; return response; });
     await tick();
     if (protocol === 2) assert.equal(Object.keys(await query).length, 0, 'v2 local response is non-terminal');
     else assert.equal(queryResolved, false, 'v1 status waits for the existing native result');
@@ -131,7 +131,7 @@ for (const protocol of [1, 2]) {
     assert.equal(store.readGoalById(h.root, h.goal().id).missingRuns, 0);
     assert.equal(h.goal().evidence.length, 0);
     assert.equal(h.timers.size, 0);
-    const pause = h.send('/goal pause');
+    const pause = h.send('/fusion-goal pause');
     assert.equal(h.connector.sent.filter(request => request.method === 'session/cancel').length, 1);
     assert.equal(h.goal().status, 'paused');
     await h.finish();
@@ -146,11 +146,11 @@ for (const protocol of [1, 2]) {
 for (const protocol of [1, 2]) {
   test(`v${protocol}: original Goal result still applies its report after a local command reply`, async t => {
     const h = fixture(t, protocol);
-    const start = h.send('/goal finish the task');
+    const start = h.send('/fusion-goal finish the task');
     if (protocol === 2) { await start; h.state('running'); }
-    const query = h.send('/goal status');
+    const query = h.send('/fusion-goal status');
     // Resume on an already active Goal returns a command-only error locally too.
-    const resume = h.send('/goal resume');
+    const resume = h.send('/fusion-goal resume');
     assert.equal(h.prompts(), 1);
     h.submit('waiting');
     await h.finish(0); await start; await query; await resume;
@@ -164,10 +164,10 @@ for (const protocol of [1, 2]) {
 
 test('v1: local command reply failure retains cancellation for the original Goal', async t => {
   const h = fixture(t, 1);
-  const start = h.send('/goal finish the task');
+  const start = h.send('/fusion-goal finish the task');
   const run = h.goal().activeRun;
   h.connector.forwardError = true;
-  assert.throws(() => h.send('/goal status'), /local reply failed/);
+  assert.throws(() => h.send('/fusion-goal status'), /local reply failed/);
   h.connector.forwardError = false;
   assert.equal(h.goal().activeRun, run);
   assert.equal(h.transport.cancel('s1', run).ok, true);
@@ -179,7 +179,7 @@ for (const protocol of [1, 2]) {
   for (const stopReason of ['cancelled', 'refusal', 'max_tokens', 'unknown', null]) {
     test(`v${protocol}: ordinary turn with ${stopReason} cannot resume a waiting Goal`, async t => {
       const h = fixture(t, protocol);
-      const start = h.send('/goal finish the task');
+      const start = h.send('/fusion-goal finish the task');
       h.submit('waiting');
       await h.finish(); await start;
       const answer = h.send('answer');
@@ -206,11 +206,11 @@ test('installed ACP distinguishes non-terminal v2 local acknowledgement from the
 for (const protocol of [1, 2]) {
   test(`v${protocol}: status during an ordinary answer preserves that live user turn`, async t => {
     const h = fixture(t, protocol);
-    const start = h.send('/goal finish the task');
+    const start = h.send('/fusion-goal finish the task');
     h.submit('waiting');
     await h.finish(); await start;
     const answer = h.send('the requested answer');
-    const query = h.send('/goal status');
+    const query = h.send('/fusion-goal status');
     await tick();
     assert.equal(h.prompts(), 2, 'status does not send another model prompt');
     assert.equal(h.goal().status, 'waiting');

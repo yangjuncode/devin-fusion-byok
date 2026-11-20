@@ -161,3 +161,74 @@ test('unsuppressed sessions keep the existing legacy continuation behaviour', TI
   h.handle.reset();
   assert.equal(h.scheduler.pending(), 0);
 });
+
+const goalPrompt = (sessionId, text) => ({
+  method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text }] }
+});
+
+test('a native /goal prompt marks the session and suppresses both continuations', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal ship it'));
+  h.connector.sendRequest(goalPrompt('s1', 'keep going'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  h.connector.forwardClientRequest(plan('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 0);
+  assert.equal(h.prompts(), 2);
+});
+
+test('/goal resume and other subcommands keep the session marked', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal resume'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 0);
+});
+
+test('a bare /goal status query does not mark the session', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 1);
+  h.scheduler.advance(2000);
+  assert.equal(h.prompts(), 2);
+});
+
+test('/goal clear releases the session so continuations resume', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal ship it'));
+  h.connector.sendRequest(goalPrompt('s1', '/goal clear'));
+  h.connector.sendRequest(goalPrompt('s1', 'hi'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 1);
+  h.scheduler.advance(2000);
+  assert.equal(h.prompts(), 4);
+});
+
+test('closing the session clears the native goal mark', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal ship it'));
+  h.connector.sendRequest({ method: 'session/close', params: { sessionId: 's1' } });
+  h.connector.sendRequest(goalPrompt('s1', 'hi'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 1);
+});
+
+test('cancelling a turn keeps the native goal mark', TIMEOUT, async t => {
+  const h = harness(new Map());
+  t.after(() => h.handle.dispose());
+  h.connector.sendRequest(goalPrompt('s1', '/goal ship it'));
+  h.connector.sendRequest({ method: 'session/cancel', params: { sessionId: 's1' } });
+  h.connector.sendRequest(goalPrompt('s1', 'hi'));
+  h.connector.forwardClientRequest(providerError('s1'));
+  await tick();
+  assert.equal(h.scheduler.pending(), 0);
+});

@@ -69,11 +69,11 @@ test('goal cards label sessions by title, distinguish duplicates and fall back t
   assert.ok(collect(byId('goals'), n => n.className === 'goalhead')[0].textContent.includes('session-idle'));
 });
 
-test('the goal panel has no session picker or start form and explains the /goal command', () => {
+test('the goal panel has no session picker or start form and explains the /fusion-goal command', () => {
   const html = goalHtml('nonce');
   for (const id of ['id="session"', 'id="objective"', 'id="criteria"', 'id="maxRuns"', 'id="start"']) assert.ok(!html.includes(id), id);
-  assert.match(html, /\/goal 要达成的目标/);
-  assert.match(html, /\/goal pause/);
+  assert.match(html, /\/fusion-goal 要达成的目标/);
+  assert.match(html, /\/fusion-goal pause/);
   assert.ok(!goalScript().includes('goal.start'));
 });
 

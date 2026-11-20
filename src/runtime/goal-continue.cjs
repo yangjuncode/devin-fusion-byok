@@ -16,11 +16,11 @@ const INTERRUPT_METHODS = new Set([
 ]);
 
 const GOAL_COMMAND = Object.freeze({
-  name: 'goal',
-  description: 'Fusion BYOK：设定目标并自动持续推进，直到完成（/goal 查看，/goal pause|resume|clear 控制）',
+  name: 'fusion-goal',
+  description: 'Fusion BYOK：设定目标并自动持续推进，直到完成（/fusion-goal 查看，/fusion-goal pause|resume|clear 控制）',
   input: { hint: '要达成的目标，写清楚怎样算完成' }
 });
-const GOAL_COMMAND_RE = /^\/goal(?:\s+([\s\S]*))?$/;
+const GOAL_COMMAND_RE = /^\/fusion-goal(?:\s+([\s\S]*))?$/;
 
 function parseGoalCommand(prompt) {
   if (!Array.isArray(prompt) || prompt.length === 0) return null;
@@ -238,7 +238,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
         });
       } catch { action = null; }
       if (!action || typeof action.prompt !== 'string' || !action.prompt) return null;
-      // /goal 之后原文可能带 /skill 等其它命令。原文追加在 goalPrompt 之后原样下发，
+      // /fusion-goal 之后原文可能带 /skill 等其它命令。原文追加在 goalPrompt 之后原样下发，
       // 由 devin-cli 自行展开，扩展不猜测各命令的参数边界；若命令参数延伸到结尾，
       // 被并入的也是用户文本而不是目标指令。
       const text = command.action === 'start' && command.text ? action.prompt + '\n\n' + command.text : action.prompt;

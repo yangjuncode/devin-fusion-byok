@@ -48,7 +48,7 @@
       },
       {
         "command": "devinFusionByok.goal",
-        "title": "Fusion BYOK：目标（Goal）"
+        "title": "Fusion BYOK：目标面板（/fusion-goal）"
       },
       {
         "command": "devinFusionByok.status",

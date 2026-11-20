@@ -470,14 +470,14 @@ function createGoalController({
         const record = sessionGoal(clean);
         if (record) return reply(describe(record));
         const previous = lastArchived(clean);
-        return reply('这个对话当前没有目标。用法：/goal 要达成的目标' +
+        return reply('这个对话当前没有目标。用法：/fusion-goal 要达成的目标' +
           (previous ? '\n\n上一个目标：' + previous.objective + '（' + (STATUS_TEXT[previous.status] || previous.status) + '）' : ''));
       }
       if (action === 'pause') {
         const record = sessionGoal(clean);
         if (!record) return reply('这个对话当前没有目标。');
         handle.pause({ id: record.id });
-        return reply('目标已暂停。输入 /goal resume 继续。');
+        return reply('目标已暂停。输入 /fusion-goal resume 继续。');
       }
       if (action === 'clear') {
         const record = sessionGoal(clean);
@@ -489,18 +489,18 @@ function createGoalController({
       if (ambiguous || connected === false) throw goalError('ambiguous-session', '这个对话同时连在多个窗口上，无法确定归属，请只在一个窗口里打开它。');
       if (action === 'resume') {
         const record = sessionGoal(clean);
-        if (!record) return reply('这个对话当前没有目标。用法：/goal 要达成的目标');
+        if (!record) return reply('这个对话当前没有目标。用法：/fusion-goal 要达成的目标');
         return commandResume(record);
       }
       if (action === 'start') return commandStart(clean, text);
       return null;
     } catch (error) {
       if (error?.code === 'not-owner') {
-        return reply('/goal 没有执行：' + error.message +
+        return reply('/fusion-goal 没有执行：' + error.message +
           '如果占用它的窗口或进程已经退出，请打开 Goal 面板（点状态栏的 Goal），对该目标使用"强制归档"。');
       }
-      if (error?.code) return reply('/goal 没有执行：' + error.message);
-      return reply('/goal 没有执行：发生了意外错误。');
+      if (error?.code) return reply('/fusion-goal 没有执行：' + error.message);
+      return reply('/fusion-goal 没有执行：发生了意外错误。');
     }
   }
 

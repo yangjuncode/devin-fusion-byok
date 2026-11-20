@@ -43,6 +43,18 @@ const RESET_METHODS = new Set([
   '_cognition.ai/session/archive'
 ]);
 
+// 原生 /goal（devin-cli v3000.11.92+）自己会在回合结束后推进目标；这段期间不再
+// 自动续接，避免两套循环互相叠加。只有 /goal clear 或会话销毁才解除标记：
+// cancel 只是中断回合，目标仍可 resume；load/resume 的会话里目标也仍在。
+const NATIVE_GOAL_RE = /^\/goal(?:\s+([\s\S]*))?$/;
+const GOAL_END_METHODS = new Set([
+  'session/close',
+  'session/delete',
+  'session/archive',
+  '_cognition.ai/session/archive'
+]);
+const NATIVE_GOAL_LIMIT = 256;
+
 function restore(target, key, wrapper, descriptor) {
   if (target[key] !== wrapper) return;
   if (descriptor) Object.defineProperty(target, key, descriptor);
@@ -75,9 +87,28 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
     try { log(event, data); } catch {}
   }
 
+  const nativeGoalSessions = new Set();
+
+  function noteNativeGoal(sessionId, request) {
+    const prompt = request?.params?.prompt;
+    if (!Array.isArray(prompt) || prompt.length === 0 ||
+        !prompt.every(block => block && block.type === 'text' && typeof block.text === 'string')) return;
+    const match = NATIVE_GOAL_RE.exec(prompt.map(block => block.text).join('').trim());
+    if (!match) return;
+    const word = (match[1] || '').trim().toLowerCase();
+    if (!word) return; // 裸 /goal 只是状态查询，不改变标记
+    if (word === 'clear') { nativeGoalSessions.delete(sessionId); return; }
+    nativeGoalSessions.add(sessionId);
+    if (nativeGoalSessions.size > NATIVE_GOAL_LIMIT) nativeGoalSessions.delete(nativeGoalSessions.values().next().value);
+  }
+
   function sessionSuppressed(sessionId) {
     if (typeof isSessionSuppressed !== 'function' || !sessionId) return false;
     try { return isSessionSuppressed(sessionId) === true; } catch { return true; }
+  }
+
+  function isSuppressed(sessionId) {
+    return nativeGoalSessions.has(sessionId) || sessionSuppressed(sessionId);
   }
 
   function detach(connector) {
@@ -170,7 +201,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
       const timer = scheduleTimer(() => {
         entry.timers.delete(sessionId);
-        if (disposed || !entry.active || !isEnabled() || sessionSuppressed(sessionId)) return;
+        if (disposed || !entry.active || !isEnabled() || isSuppressed(sessionId)) return;
         const currentTurn = entry.sessions.get(sessionId);
         if (!currentTurn || currentTurn.generation !== generation || currentTurn.retryDisallowed) return;
         executeAuto(sessionId, attempts, currentTurn);
@@ -291,10 +322,10 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           const options = getOptions() || {};
           const underLimit = turn.attempts < normalizedMaxAttempts(options);
 
-          const shouldRetryError = !turn.retryDisallowed && isEnabled() && !sessionSuppressed(sessionId) && options.onProviderError !== false && matchesProviderError(turn.tail);
+          const shouldRetryError = !turn.retryDisallowed && isEnabled() && !isSuppressed(sessionId) && options.onProviderError !== false && matchesProviderError(turn.tail);
           const hasPendingPlan = checkHasPendingPlan(turn);
           const isBlocked = matchesTerminalBlocker(turn.tail);
-          const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !sessionSuppressed(sessionId) && options.untilPlanComplete === true &&
+          const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !isSuppressed(sessionId) && options.untilPlanComplete === true &&
             hasPendingPlan && (res.stopReason === 'end_turn' || res.stopReason === 'max_tokens');
 
           if ((shouldRetryError || shouldRetryPlan) && !underLimit) {
@@ -338,7 +369,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           const isExactMsg = (msg === TARGET_ERROR || msg === TARGET_ERROR + '.');
           const options = getOptions() || {};
 
-          if (isEnabled() && options.onProviderError !== false && isExactMsg && !sessionSuppressed(sessionId) &&
+          if (isEnabled() && options.onProviderError !== false && isExactMsg && !isSuppressed(sessionId) &&
               turn.attempts < normalizedMaxAttempts(options)) {
             turn.lastResult = { value: err, isReject: true };
             scheduleAuto(sessionId, turn, 'error');
@@ -482,10 +513,10 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
             const underLimit = turn.attempts < normalizedMaxAttempts(options);
             const isError = matchesProviderError(turn.tail);
             const isBlocked = matchesTerminalBlocker(turn.tail);
-            const shouldRetryError = !turn.retryDisallowed && isEnabled() && !sessionSuppressed(sessionId) && options.onProviderError !== false && isError;
+            const shouldRetryError = !turn.retryDisallowed && isEnabled() && !isSuppressed(sessionId) && options.onProviderError !== false && isError;
             const hasPendingPlan = checkHasPendingPlan(turn);
             const allowedPlanReason = update.stopReason === 'end_turn' || update.stopReason === 'max_tokens';
-            const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !sessionSuppressed(sessionId) && options.untilPlanComplete === true && hasPendingPlan && allowedPlanReason;
+            const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !isSuppressed(sessionId) && options.untilPlanComplete === true && hasPendingPlan && allowedPlanReason;
 
             if ((shouldRetryError || shouldRetryPlan) && !underLimit) {
               report('auto-continue-stopped', { reason: 'max-attempts', attempts: turn.attempts });
@@ -589,10 +620,15 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
         entry.sessions.delete(sessionId);
       }
 
+      if (!disposed && entry.active && typeof sessionId === 'string' && sessionId) {
+        if (GOAL_END_METHODS.has(method)) nativeGoalSessions.delete(sessionId);
+        else if (method === 'session/prompt') noteNativeGoal(sessionId, request);
+      }
+
       const enabled = isEnabled();
       const isAuto = autoAttempts.has(request);
       const isV2 = connector.protocolVersion >= 2;
-      const suppressed = !isAuto && sessionSuppressed(sessionId);
+      const suppressed = !isAuto && isSuppressed(sessionId);
 
       let manualTurn;
       if (!disposed && entry.active && sessionId && method === 'session/prompt') {
@@ -805,6 +841,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       if (disposed) return;
       disposed = true;
       handle.reset();
+      nativeGoalSessions.clear();
       restore(api, 'registerConnection', registerWrapper, registrationDescriptor);
       for (const connector of [...connections.keys()]) detach(connector);
       delete api[INSTANCE];

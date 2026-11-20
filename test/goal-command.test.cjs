@@ -41,47 +41,56 @@ function transportFixture() {
 }
 const update = (sessionId, body) => ({ method: 'session/update', params: { sessionId, update: body } });
 
-test('parseGoalCommand recognises /goal forms and ignores other prompts', () => {
-  assert.deepEqual(parseGoalCommand(text('/goal')), { action: 'status', text: '' });
-  assert.deepEqual(parseGoalCommand(text('  /goal  ')), { action: 'status', text: '' });
-  assert.deepEqual(parseGoalCommand(text('/goal pause')), { action: 'pause', text: '' });
-  assert.deepEqual(parseGoalCommand(text('/goal RESUME')), { action: 'resume', text: '' });
-  assert.deepEqual(parseGoalCommand(text('/goal clear')), { action: 'clear', text: '' });
-  assert.deepEqual(parseGoalCommand(text('/goal 让 test/auth 全部通过\n并保持 lint 干净')), { action: 'start', text: '让 test/auth 全部通过\n并保持 lint 干净' });
-  assert.deepEqual(parseGoalCommand(text('/goal /implement xxx, /skill-two, 目标文本')), { action: 'start', text: '/implement xxx, /skill-two, 目标文本' });
-  assert.deepEqual(parseGoalCommand([{ type: 'text', text: '/goal ' }, { type: 'text', text: 'fix it' }]), { action: 'start', text: 'fix it' });
-  assert.equal(parseGoalCommand(text('/goals list')), null);
-  assert.equal(parseGoalCommand(text('please /goal this')), null);
-  assert.equal(parseGoalCommand([{ type: 'text', text: '/goal x' }, { type: 'image', data: '' }]), null);
+test('parseGoalCommand recognises /fusion-goal forms and ignores other prompts', () => {
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal')), { action: 'status', text: '' });
+  assert.deepEqual(parseGoalCommand(text('  /fusion-goal  ')), { action: 'status', text: '' });
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal pause')), { action: 'pause', text: '' });
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal RESUME')), { action: 'resume', text: '' });
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal clear')), { action: 'clear', text: '' });
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal 让 test/auth 全部通过\n并保持 lint 干净')), { action: 'start', text: '让 test/auth 全部通过\n并保持 lint 干净' });
+  assert.deepEqual(parseGoalCommand(text('/fusion-goal /implement xxx, /skill-two, 目标文本')), { action: 'start', text: '/implement xxx, /skill-two, 目标文本' });
+  assert.deepEqual(parseGoalCommand([{ type: 'text', text: '/fusion-goal ' }, { type: 'text', text: 'fix it' }]), { action: 'start', text: 'fix it' });
+  assert.equal(parseGoalCommand(text('/fusion-goals list')), null);
+  assert.equal(parseGoalCommand(text('please /fusion-goal this')), null);
+  assert.equal(parseGoalCommand([{ type: 'text', text: '/fusion-goal x' }, { type: 'image', data: '' }]), null);
+  assert.equal(parseGoalCommand(text('/goal')), null, 'native /goal is left to devin-cli');
+  assert.equal(parseGoalCommand(text('/goal ship it')), null, 'native /goal is left to devin-cli');
+  assert.equal(parseGoalCommand(text('/goal resume')), null, 'native /goal is left to devin-cli');
   assert.equal(parseGoalCommand(undefined), null);
 });
 
 test('the goal command is appended to the native command list once', () => {
   const message = update('s1', { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'skills', description: 'd' }] });
   const next = withGoalCommand(message);
-  assert.deepEqual(next.params.update.availableCommands.map(c => c.name), ['skills', 'goal']);
+  assert.deepEqual(next.params.update.availableCommands.map(c => c.name), ['skills', 'fusion-goal']);
   assert.equal(message.params.update.availableCommands.length, 1, 'original message is not mutated');
   assert.equal(withGoalCommand(next), next);
   const other = update('s1', { sessionUpdate: 'agent_message_chunk' });
   assert.equal(withGoalCommand(other), other);
 });
 
-test('forwarded command lists include /goal', () => {
+test('the fusion-goal command coexists with the native /goal command', () => {
+  const message = update('s1', { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'goal', description: 'native' }] });
+  const next = withGoalCommand(message);
+  assert.deepEqual(next.params.update.availableCommands.map(c => c.name), ['goal', 'fusion-goal']);
+});
+
+test('forwarded command lists include /fusion-goal', () => {
   const { handle, c } = transportFixture();
   try {
     c.forwardClientRequest(update('s1', { sessionUpdate: 'available_commands_update', availableCommands: [] }));
-    assert.deepEqual(JSON.parse(JSON.stringify(c.forwards[0].params.update.availableCommands.map(x => x.name))), ['goal']);
+    assert.deepEqual(JSON.parse(JSON.stringify(c.forwards[0].params.update.availableCommands.map(x => x.name))), ['fusion-goal']);
   } finally { handle.dispose(); }
 });
 
-test('a /goal prompt is rewritten into the goal run and tracked without a manual-prompt interrupt', async () => {
+test('a /fusion-goal prompt is rewritten into the goal run and tracked without a manual-prompt interrupt', async () => {
   const { handle, c } = transportFixture();
   try {
     const events = [], calls = [];
     handle.setListener(event => events.push(event));
     handle.setCommandHandler(call => { calls.push(call); handle.setGoalOwned(call.sessionId, true); return { prompt: 'GOAL PROMPT', runId: 'run-1' }; });
     await c.sendRequest({ method: 'session/new', params: { sessionId: 's1' } });
-    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/goal ship it'), _meta: { keep: 1 } } });
+    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/fusion-goal ship it'), _meta: { keep: 1 } } });
     assert.deepEqual(calls.map(x => [x.sessionId, x.action, x.text, x.ambiguous, x.connected]), [['s1', 'start', 'ship it', false, true]]);
     const sent = c.sent.at(-1);
     assert.deepEqual(JSON.parse(JSON.stringify(sent.params)), { sessionId: 's1', prompt: text('GOAL PROMPT\n\nship it'), _meta: { keep: 1 } });
@@ -92,14 +101,14 @@ test('a /goal prompt is rewritten into the goal run and tracked without a manual
   } finally { handle.dispose(); }
 });
 
-test('a /goal prompt carrying other slash commands keeps them verbatim after the goal prompt', async () => {
+test('a /fusion-goal prompt carrying other slash commands keeps them verbatim after the goal prompt', async () => {
   const { handle, c } = transportFixture();
   try {
     const calls = [];
     handle.setCommandHandler(call => { calls.push(call); handle.setGoalOwned(call.sessionId, true); return { prompt: 'GOAL PROMPT', runId: 'run-1' }; });
     await c.sendRequest({ method: 'session/new', params: { sessionId: 's1' } });
     const rest = '/implement xxx, /skill-two, 把功能落地并验证';
-    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/goal ' + rest) } });
+    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/fusion-goal ' + rest) } });
     assert.equal(calls.at(-1).action, 'start');
     assert.equal(calls.at(-1).text, rest);
     const sent = c.sent.at(-1);
@@ -113,8 +122,21 @@ test('goal control commands and plain objectives do not get the verbatim suffix'
   try {
     handle.setCommandHandler(() => ({ prompt: 'REPLY PROMPT' }));
     await c.sendRequest({ method: 'session/new', params: { sessionId: 's1' } });
-    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/goal pause') } });
+    await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('/fusion-goal pause') } });
     assert.equal(c.sent.at(-1).params.prompt[0].text, 'REPLY PROMPT');
+  } finally { handle.dispose(); }
+});
+
+test('a native /goal prompt passes straight to devin-cli without invoking the goal handler', async () => {
+  const { handle, c } = transportFixture();
+  try {
+    const calls = [];
+    handle.setCommandHandler(call => { calls.push(call); return { prompt: 'GOAL PROMPT', runId: 'run-1' }; });
+    const request = { method: 'session/prompt', params: { sessionId: 's1', prompt: text('/goal ship it') } };
+    await c.sendRequest(request);
+    assert.equal(c.sent.at(-1), request);
+    assert.equal(c.sent.at(-1).params.prompt[0].text, '/goal ship it');
+    assert.equal(calls.length, 0, 'the native command must not reach the Fusion goal handler');
   } finally { handle.dispose(); }
 });
 
@@ -127,7 +149,7 @@ test('ordinary prompts and unhandled commands pass through untouched', async () 
     const plain = { method: 'session/prompt', params: { sessionId: 's1', prompt: text('hello') } };
     await c.sendRequest(plain);
     assert.equal(c.sent.at(-1), plain);
-    const command = { method: 'session/prompt', params: { sessionId: 's1', prompt: text('/goal x') } };
+    const command = { method: 'session/prompt', params: { sessionId: 's1', prompt: text('/fusion-goal x') } };
     await c.sendRequest(command);
     assert.equal(c.sent.at(-1), command);
     assert.equal(events.filter(e => e.type === 'user-prompt').length, 2);
@@ -209,7 +231,7 @@ test('the controller registers itself as the command handler', t => {
   assert.match(h.command('status').prompt, /当前没有目标/);
 });
 
-test('/goal <text> starts a goal on the current session without any session picking or idle check', t => {
+test('/fusion-goal <text> starts a goal on the current session without any session picking or idle check', t => {
   const h = harness(t);
   const action = h.command('start', '让测试全部通过');
   assert.equal(typeof action.runId, 'string');
@@ -246,7 +268,7 @@ test('a progress report continues automatically and a complete report ends and a
   });
 });
 
-test('/goal status, pause, resume and clear manage the current goal', t => {
+test('/fusion-goal status, pause, resume and clear manage the current goal', t => {
   const h = harness(t);
   h.command('start', 'ship it');
   assert.match(h.command('status').prompt, /目标：ship it[\s\S]*进行中[\s\S]*1 \/ 10/);
@@ -264,7 +286,7 @@ test('/goal status, pause, resume and clear manage the current goal', t => {
   assert.match(h.command('resume').prompt, /当前没有目标/);
 });
 
-test('a new /goal replaces the existing goal on the same session', t => {
+test('a new /fusion-goal replaces the existing goal on the same session', t => {
   const h = harness(t);
   h.command('start', 'first');
   const second = h.command('start', 'second');
@@ -318,7 +340,7 @@ test('command errors are answered as text instead of breaking the prompt', t => 
   const h = harness(t);
   const reply = h.command('start', '   ');
   assert.equal(reply.runId, undefined);
-  assert.match(reply.prompt, /\/goal 没有执行/);
+  assert.match(reply.prompt, /\/fusion-goal 没有执行/);
   const ambiguous = h.controller.handleCommand({ sessionId: 's1', action: 'start', text: 'x', ambiguous: true, connected: false });
   assert.match(ambiguous.prompt, /多个窗口/);
   assert.equal(h.controller.snapshot().goals.length, 0);
