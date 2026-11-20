@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # server-installer.sh — 在只装了 Devin CLI（无 Devin Desktop）的服务器上安装 Fusion BYOK。
+# 已装 Desktop 插件的机器请改用 scripts/install-service.sh（复用插件与配置，无需 vsix）。
 #
 # 用法：把本脚本与 devin-fusion-byok-<版本>.vsix 放在同一目录，然后：
 #   ./server-installer.sh install                 # 解包 vsix、装后端服务、写入环境变量
@@ -422,7 +423,10 @@ status() {
   info "存储根目录：$root（$([ -f "${root}/config.json" ] && echo 'config.json 存在' || echo 'config.json 缺失'))"
   info "扩展目录：$(ls -d "${EXT_HOME}/"*devin-fusion-byok-* 2>/dev/null | tail -n 1 || echo '未安装')"
   if systemd_usable; then
-    info "服务状态：$(systemctl --user is-active "$SERVICE" 2>/dev/null || echo unknown) / 开机自启：$(systemctl --user is-enabled "$SERVICE" 2>/dev/null || echo unknown)"
+    local active enabled
+    active="$(systemctl --user is-active "$SERVICE" 2>/dev/null || true)"; [ -n "$active" ] || active=unknown
+    enabled="$(systemctl --user is-enabled "$SERVICE" 2>/dev/null || true)"; [ -n "$enabled" ] || enabled=unknown
+    info "服务状态：${active} / 开机自启：${enabled}"
   else
     info "systemd 用户会话不可用"
   fi
