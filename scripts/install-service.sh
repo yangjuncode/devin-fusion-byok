@@ -136,6 +136,20 @@ systemd_usable() {
   ! printf '%s' "$out" | grep -qi 'not been booted\|Failed to connect to bus\|command not found'
 }
 
+# linger 未开时 user service 登出即被停、也不会开机自启。对自己执行
+# loginctl enable-linger 通常经 polkit 免 sudo 即可，失败再给手动命令。
+ensure_linger() {
+  have loginctl || return 0
+  local u="${USER:-$(id -un)}" linger
+  linger="$(loginctl show-user "$u" -p Linger 2>/dev/null | cut -d= -f2 || true)"
+  [ "$linger" = "yes" ] && return 0
+  if loginctl enable-linger "$u" 2>/dev/null; then
+    info "已自动开启 linger（开机自启、登出后服务保活）。"
+  else
+    info "提示：未开启 linger，退出登录后服务会被停止、开机也不会自启。需要常驻请执行：sudo loginctl enable-linger $u"
+  fi
+}
+
 rc_files() {
   printf '%s\n' "${HOME}/.profile" "${HOME}/.bashrc"
   for f in .bash_profile .zshrc .zprofile; do
@@ -236,10 +250,7 @@ install() {
     systemctl --user daemon-reload
     systemctl --user enable --now "$SERVICE" >/dev/null
     info "systemd 用户服务已启用并启动。"
-    if have loginctl; then
-      local linger; linger="$(loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | cut -d= -f2 || true)"
-      [ "$linger" = "yes" ] || info "提示：未开启 linger，退出登录后服务会被停止。需要常驻请执行：sudo loginctl enable-linger ${USER:-$(id -un)}"
-    fi
+    ensure_linger
   else
     info "提示：systemd 用户会话不可用，改用 setsid 后台方式启动（重启后需重新运行本脚本或手动启动 $LAUNCHER）。"
     if have setsid; then setsid "$LAUNCHER" >/dev/null 2>&1 < /dev/null &
@@ -303,6 +314,7 @@ status() {
     active="$(systemctl --user is-active "$SERVICE" 2>/dev/null || true)"; [ -n "$active" ] || active=unknown
     enabled="$(systemctl --user is-enabled "$SERVICE" 2>/dev/null || true)"; [ -n "$enabled" ] || enabled=unknown
     info "服务状态：${active} / 开机自启：${enabled}"
+    have loginctl && info "linger（登出保活）：$(loginctl show-user "${USER:-$(id -un)}" -p Linger 2>/dev/null | cut -d= -f2 || echo unknown)"
   else
     info "systemd 用户会话不可用"
   fi
