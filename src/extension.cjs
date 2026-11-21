@@ -1,11 +1,12 @@
 'use strict';
 const vscode = require('vscode');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { importLegacy, readConfig, writeConfig } = require('./config.cjs');
 const { buildCatalog, normalizeFusionConfig } = require('./catalog.cjs');
-const { createManager } = require('./panel/model.cjs');
+const { createManager, sanitizeImportedConfig, PanelInputError } = require('./panel/model.cjs');
 const { installLsInjection } = require('./runtime/ls-injection.cjs');
 const { createLsBridge } = require('./runtime/bridge.cjs');
 const { backendEnvironment } = require('./runtime/backend-env.cjs');
@@ -478,14 +479,52 @@ async function activate(context) {
     },
     selectFusion: saveFusionChoice,
     afterChange: async type => {
-      if (type === 'setEnabled' && config().enabled === false) await disable();
+      if ((type === 'setEnabled' || type === 'importConfig') && config().enabled === false) await disable();
       else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
-      if (type === 'setHomeModels' || type === 'resetHomeModels') nativePicker?.markReloadNeeded();
+      if (type === 'setHomeModels' || type === 'resetHomeModels' || type === 'importConfig') nativePicker?.markReloadNeeded();
       await hostCatalog?.refresh();
     } });
+  const dialogsAvailable = typeof vscode.window.showSaveDialog === 'function' && typeof vscode.window.showOpenDialog === 'function';
   management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError,
-    readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
+    readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }),
+    configIO: {
+      // 导出即 config.json 全文（含 API 密钥明文），仅剔除本机运行态的 inferenceServerUrl；
+      // 目标机器导入后启用时自动重写。文件权限 0600，与 scripts/export-config.sh 一致。
+      exportConfig: async () => {
+        if (!dialogsAvailable) throw new PanelInputError('当前环境不支持文件对话框。');
+        const target = await vscode.window.showSaveDialog({
+          title: '导出 Fusion BYOK 配置', saveLabel: '导出',
+          defaultUri: vscode.Uri.file(path.join(os.homedir(), 'fusion-byok-config.json')),
+          filters: { 'JSON 文件': ['json'] },
+        });
+        if (!target) return { note: '已取消导出。' };
+        const { inferenceServerUrl, ...exported } = config();
+        fs.writeFileSync(target.fsPath, JSON.stringify(exported, null, 2) + '\n', { mode: 0o600 });
+        try { fs.chmodSync(target.fsPath, 0o600); } catch {}
+        return { note: '配置已导出到 ' + target.fsPath + '。文件含 API 密钥明文，请勿公开分享。' };
+      },
+      importConfig: async () => {
+        if (!dialogsAvailable) throw new PanelInputError('当前环境不支持文件对话框。');
+        const picks = await vscode.window.showOpenDialog({
+          title: '导入 Fusion BYOK 配置', openLabel: '导入', canSelectMany: false,
+          filters: { 'JSON 文件': ['json'] },
+        });
+        const file = picks?.[0];
+        if (!file) return { note: '已取消导入。' };
+        let parsed;
+        try { parsed = JSON.parse(fs.readFileSync(file.fsPath, 'utf8')); }
+        catch { throw new PanelInputError('所选文件不是有效的 JSON 配置。'); }
+        const clean = sanitizeImportedConfig(parsed);
+        if (typeof vscode.window.showWarningMessage !== 'function') throw new PanelInputError('当前环境不支持覆盖确认。');
+        const modelTotal = clean.providers.reduce((sum, provider) => sum + provider.models.length, 0);
+        const choice = await vscode.window.showWarningMessage(
+          `导入将覆盖当前全部 Fusion BYOK 配置（${clean.providers.length} 个供应商、${modelTotal} 个模型及 API 密钥），且不可撤销。确定继续？`,
+          { modal: true }, '导入并覆盖');
+        if (choice !== '导入并覆盖') return { note: '已取消导入。' };
+        return { config: clean };
+      },
+    } });
   try {
     require('./panel/goal-view.cjs').createGoalUi({ vscode, context,
       controller: {

@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
-function createPanelController({ vscode, context, manager, safeError, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
+function createPanelController({ vscode, context, manager, safeError, readMonitor = async () => ({ status: 'unsupported', snapshot: null }), configIO }) {
   let panel;
   let monitorPending = false;
   const refreshMonitor = async () => {
@@ -48,6 +48,19 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
           await manager.dispatch('normalizePickerModels');
           await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
           await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          return;
+        }
+        if (message.type === 'exportConfig' || message.type === 'importConfig') {
+          const hook = message.type === 'exportConfig' ? configIO?.exportConfig : configIO?.importConfig;
+          if (typeof hook !== 'function') throw new PanelInputError('当前环境暂不支持该操作。');
+          const outcome = await hook() || {};
+          let note = outcome.note;
+          if (outcome.config != null) {
+            const next = await manager.dispatch('importConfig', { config: outcome.config });
+            await postState(current, next);
+            note = note || '配置已导入。';
+          }
+          await current.webview.postMessage({ type: 'result', id: message.id, ok: true, note });
           return;
         }
         const state = await manager.dispatch(message.type, message.payload);

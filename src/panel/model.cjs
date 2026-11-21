@@ -46,6 +46,86 @@ function cleanSidekicks(config) {
       provider.models.some(model => model.id === sidekick?.model && model.enabled !== false)));
   config.sidekicks = valid;
 }
+// 导入白名单清洗：外部文件只保留已知字段并逐项校验，未知键与无效条目不进入存储。
+// inferenceServerUrl 属于本机运行态，不随配置迁移；目标机器启用时自行写入。
+function sanitizeImportedConfig(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('配置文件格式无效。');
+  if (!Array.isArray(input.providers) || input.providers.length > 50) fail('配置文件中的供应商列表无效。');
+  const clean = { enabled: input.enabled !== false, providers: [] };
+  const providerIds = new Set();
+  for (const entry of input.providers) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) fail('供应商条目无效。');
+    if (!['openai-responses', 'openai'].includes(entry.apiFormat)) fail('供应商的 API 类型无效。');
+    if (own(entry, 'apiKey') && (typeof entry.apiKey !== 'string' || entry.apiKey.length > 8192 || /[\r\n]/.test(entry.apiKey))) fail('供应商的 API Key 无效。');
+    const provider = {
+      id: text(entry.id, '供应商 ID', 100), name: text(entry.name, '供应商名称', 80),
+      baseUrl: baseUrl(entry.baseUrl), apiFormat: entry.apiFormat, apiKey: entry.apiKey?.trim() || '',
+      enabled: entry.enabled !== false, models: [],
+      ...(entry.unlockKind === 'codex' ? { unlockKind: 'codex' } : {}),
+    };
+    if (providerIds.has(provider.id)) fail('供应商 ID 重复：' + provider.id);
+    providerIds.add(provider.id);
+    if (!Array.isArray(entry.models) || entry.models.length > 1000) fail('供应商“' + provider.name + '”的模型列表无效。');
+    const modelIds = new Set();
+    for (const item of entry.models) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) fail('模型条目无效。');
+      const id = text(item.id, '模型 ID');
+      if (modelIds.has(id)) fail('供应商“' + provider.name + '”中模型 ID 重复：' + id);
+      modelIds.add(id);
+      const model = modelPatch(item, { id, label: id, enabled: true, efforts: [], contextWindow: 272000, maxOutputTokens: 32768 });
+      if (item.source === 'manual') model.source = 'manual';
+      provider.models.push(model);
+    }
+    clean.providers.push(provider);
+  }
+  const cleanRef = value => {
+    if (!refKey(value)) return null;
+    return value.nativeUid ? { nativeUid: value.nativeUid } : { providerId: value.providerId, model: value.model };
+  };
+  const refList = value => (Array.isArray(value) ? value : []).slice(0, 500).map(cleanRef).filter(Boolean);
+  clean.sidekicks = (Array.isArray(input.sidekicks) ? input.sidekicks : []).slice(0, 500).map(item => {
+    const ref = cleanRef(item);
+    if (ref?.nativeUid && typeof item.label === 'string' && item.label.length <= 256 && !/[\u0000-\u001f]/.test(item.label)) ref.label = item.label;
+    return ref;
+  }).filter(Boolean);
+  clean.roleExclusions = { lead: refList(input.roleExclusions?.lead), sidekick: refList(input.roleExclusions?.sidekick) };
+  clean.roleInclusions = { lead: refList(input.roleInclusions?.lead), sidekick: refList(input.roleInclusions?.sidekick) };
+  clean.hiddenNativeModelUids = [...new Set((Array.isArray(input.hiddenNativeModelUids) ? input.hiddenNativeModelUids : [])
+    .filter(uid => typeof uid === 'string' && uid && uid.length <= 256 && !/^(?:fusion-)?dfbyok-/.test(uid)))].slice(0, 2000);
+  if (Array.isArray(input.homeModels)) clean.homeModels = normalizeHomeModels(input.homeModels);
+  if (Array.isArray(input.fusionPresets)) {
+    clean.fusionPresets = input.fusionPresets.slice(0, 200).map(preset => {
+      if (!preset || typeof preset !== 'object' || Array.isArray(preset)) return null;
+      const id = typeof preset.id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(preset.id) ? preset.id : null;
+      const name = typeof preset.name === 'string' && preset.name.trim() && preset.name.length <= 80 && !/[\u0000-\u001f]/.test(preset.name) ? preset.name.trim() : null;
+      const result = id && name ? { id, name } : null;
+      for (const role of ['lead', 'sidekick']) {
+        if (!result) return null;
+        const ref = cleanRef(preset[role]);
+        if (!ref) return null;
+        if (!ref.nativeUid) {
+          if (preset[role].effort != null && (typeof preset[role].effort !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(preset[role].effort))) return null;
+          ref.effort = preset[role].effort ?? null;
+        }
+        result[role] = ref;
+      }
+      return result;
+    }).filter(Boolean);
+  }
+  if (typeof input.defaultFusionUid === 'string' && /^fusion-dfbyok-[a-z0-9-]{1,150}$/.test(input.defaultFusionUid)) clean.defaultFusionUid = input.defaultFusionUid;
+  for (const key of ['autoContinueOnProviderError', 'autoContinueUntilPlanComplete', 'autoByok']) if (input[key] === true) clean[key] = true;
+  for (const [key, min, max] of [['autoContinueMaxAttempts', 0, 100], ['upstreamRetries', 0, 100], ['goalDefaultMaxRuns', 1, 100],
+    ['monitorRetentionDays', 1, 365], ['gptContextWindowCap', 0, 2147483647], ['contextWindowCap', 0, 2147483647]]) {
+    if (!own(input, key)) continue;
+    if (!Number.isSafeInteger(input[key]) || input[key] < min || input[key] > max) fail('配置项 ' + key + ' 无效。');
+    clean[key] = input[key];
+  }
+  if (own(input, 'nativeModelFilter')) {
+    if (typeof input.nativeModelFilter !== 'string' || input.nativeModelFilter.length > 2000 || /[\u0000-\u001f]/.test(input.nativeModelFilter)) fail('官方模型过滤条件无效。');
+    clean.nativeModelFilter = input.nativeModelFilter;
+  }
+  return clean;
+}
 // Picker first page: every own Fusion, BYOK model and visible official model can be
 // chosen; uids the catalog cannot resolve right now stay listed as unavailable.
 function homeState(catalog, natives, picker) {
@@ -384,12 +464,13 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         config.monitorRetentionDays = days;
         break;
       }
+      case 'importConfig': config = sanitizeImportedConfig(payload.config); break;
       default: fail('不支持的操作。');
     }
     cleanSidekicks(config);
     buildCatalog(config, nativeModels()); // Validate the complete model graph before committing.
     write(config);
-    if (type === 'importModels') pendingImport = undefined;
+    if (type === 'importModels' || type === 'importConfig') pendingImport = undefined;
     await afterChange(type);
     return state();
   }
@@ -398,4 +479,4 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
     queue = operation.catch(() => {}); return operation;
   } };
 }
-module.exports = { createManager, publicState, cleanSidekicks, PanelInputError };
+module.exports = { createManager, publicState, cleanSidekicks, sanitizeImportedConfig, PanelInputError };

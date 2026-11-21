@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createManager, publicState, cleanSidekicks, PanelInputError } = require('../src/panel/model.cjs');
+const { createManager, publicState, cleanSidekicks, sanitizeImportedConfig, PanelInputError } = require('../src/panel/model.cjs');
 const { buildCatalog, DEFAULT_NATIVE_MODEL_FILTER } = require('../src/catalog.cjs');
 
 const nativeSidekick = { nativeUid: 'swe-2-max', label: 'SWE-2 Max' };
@@ -602,4 +602,111 @@ test('native first-page editing exposes grey pins and never changes provider set
   assert.deepEqual(state.nativePicker.recent.map(item => item.uid), ['swe-2-max']);
   assert.equal(f.writes.length, 0);
   assert.ok(state.nativeModels.every(item => item.disabled));
+});
+
+test('exported config round-trips through sanitize minus runtime-only fields', () => {
+  const source = fixture();
+  source.fusionPresets = [{ id: 'mine', name: '我的组合', lead: { providerId: 'cpa', model: 'lead', effort: 'high' }, sidekick: { providerId: 'cpa', model: 'executor', effort: null } }];
+  source.defaultFusionUid = 'fusion-dfbyok-preset-abc123';
+  source.hiddenNativeModelUids = ['claude-x'];
+  source.homeModels = ['official-1', 'dfbyok-2'];
+  source.roleExclusions = { lead: [{ providerId: 'cpa', model: 'lead' }], sidekick: [] };
+  source.roleInclusions = { lead: [], sidekick: [{ nativeUid: 'swe-2-max' }] };
+  source.autoContinueOnProviderError = true;
+  source.autoByok = true;
+  source.autoContinueMaxAttempts = 5;
+  source.upstreamRetries = 0;
+  source.goalDefaultMaxRuns = 20;
+  source.monitorRetentionDays = 30;
+  source.gptContextWindowCap = 272000;
+  source.contextWindowCap = 500000;
+  source.nativeModelFilter = 'kimi;glm';
+  const clean = sanitizeImportedConfig(JSON.parse(JSON.stringify(source)));
+  assert.equal(clean.inferenceServerUrl, undefined, '本机运行态字段不迁移');
+  const { inferenceServerUrl, ...expected } = source;
+  assert.deepEqual(clean, expected);
+});
+
+test('sanitizeImportedConfig hard-fails structurally invalid files', () => {
+  const base = () => JSON.parse(JSON.stringify(fixture()));
+  const invalid = [
+    null, 'x', [], 42,
+    { ...base(), providers: 'nope' },
+    { ...base(), providers: [null] },
+    { ...base(), providers: [{ ...base().providers[0], apiFormat: 'weird' }] },
+    { ...base(), providers: [{ ...base().providers[0], apiKey: 'a\nb' }] },
+    { ...base(), providers: [{ ...base().providers[0], apiKey: 17 }] },
+    { ...base(), providers: [{ ...base().providers[0], baseUrl: 'ftp://host/v1' }] },
+    { ...base(), providers: [{ ...base().providers[0], id: '' }] },
+    { ...base(), providers: [base().providers[0], base().providers[0]] },
+    { ...base(), providers: [{ ...base().providers[0], models: 'x' }] },
+    { ...base(), providers: [{ ...base().providers[0], models: [{ id: 'a', contextWindow: 100, maxOutputTokens: 200 }] }] },
+    { ...base(), upstreamRetries: 101 },
+    { ...base(), autoContinueMaxAttempts: -1 },
+    { ...base(), monitorRetentionDays: 1.5 },
+    { ...base(), nativeModelFilter: 42 },
+  ];
+  for (const input of invalid) assert.throws(() => sanitizeImportedConfig(input), PanelInputError, JSON.stringify(input)?.slice(0, 80));
+});
+
+test('sanitizeImportedConfig drops unknown keys, malformed presets and stale refs', () => {
+  const input = JSON.parse(JSON.stringify(fixture()));
+  input.junk = 'drop me';
+  input.defaultFusionUid = 'fusion-notmine';
+  input.hiddenNativeModelUids = ['claude-x', 'dfbyok-own', 'claude-x', 42, ''];
+  input.sidekicks = [{ providerId: 'cpa', model: 'executor' }, { nativeUid: 'swe-2-max', label: 'SWE' }, { nativeUid: 'fusion-dfbyok-x' }, null, { providerId: 'ghost', model: 'gone' }];
+  input.roleExclusions = { lead: [{ providerId: 'cpa', model: 'lead', extra: 1 }, 'bad'], sidekick: 'x' };
+  input.fusionPresets = [
+    { id: 'ok', name: 'Good', lead: { providerId: 'cpa', model: 'lead', effort: 'high' }, sidekick: { nativeUid: 'swe-2-max' } },
+    { id: 'bad id!', name: 'Bad id', lead: { providerId: 'cpa', model: 'lead' }, sidekick: { providerId: 'cpa', model: 'executor' } },
+    { id: 'no-side', name: 'Missing role', lead: { providerId: 'cpa', model: 'lead' } },
+    { id: 'bad-effort', name: 'Bad effort', lead: { providerId: 'cpa', model: 'lead', effort: 'HIGH!' }, sidekick: { providerId: 'cpa', model: 'executor' } },
+    'garbage',
+    { id: 'native-effort', name: 'Native effort', lead: { nativeUid: 'swe-2-max', effort: 'high' }, sidekick: { providerId: 'cpa', model: 'executor' } },
+  ];
+  const clean = sanitizeImportedConfig(input);
+  assert.equal(clean.junk, undefined);
+  assert.equal(clean.defaultFusionUid, undefined);
+  assert.deepEqual(clean.hiddenNativeModelUids, ['claude-x']);
+  assert.deepEqual(clean.sidekicks, [{ providerId: 'cpa', model: 'executor' }, { nativeUid: 'swe-2-max', label: 'SWE' }, { providerId: 'ghost', model: 'gone' }],
+    '结构合法的失效引用保留，交由写入时的 cleanSidekicks 清理');
+  assert.deepEqual(clean.roleExclusions, { lead: [{ providerId: 'cpa', model: 'lead' }], sidekick: [] });
+  assert.deepEqual(clean.roleInclusions, { lead: [], sidekick: [] });
+  assert.deepEqual(clean.fusionPresets, [
+    { id: 'ok', name: 'Good', lead: { providerId: 'cpa', model: 'lead', effort: 'high' }, sidekick: { nativeUid: 'swe-2-max' } },
+    { id: 'native-effort', name: 'Native effort', lead: { nativeUid: 'swe-2-max' }, sidekick: { providerId: 'cpa', model: 'executor', effort: null } },
+  ]);
+});
+
+test('importConfig replaces the whole config atomically through the write queue', async () => {
+  const f = memory(), before = f.read();
+  const incoming = {
+    enabled: true,
+    providers: [{ id: 'newp', name: 'New', baseUrl: 'https://new.example/v1/', apiFormat: 'openai', apiKey: 'imported-secret',
+      enabled: true, unlockKind: 'codex', models: [{ id: 'm1', label: 'New · m1', enabled: true, efforts: ['low'], contextWindow: 100000, maxOutputTokens: 8192 }] }],
+    sidekicks: [{ providerId: 'newp', model: 'm1' }, { providerId: 'gone', model: 'x' }],
+    autoByok: true, upstreamRetries: 3,
+  };
+  const state = await f.manager.dispatch('importConfig', { config: incoming });
+  const next = f.read();
+  assert.deepEqual(next.providers, [{ id: 'newp', name: 'New', baseUrl: 'https://new.example/v1', apiFormat: 'openai', apiKey: 'imported-secret',
+    enabled: true, unlockKind: 'codex', models: [{ id: 'm1', label: 'New · m1', enabled: true, efforts: ['low'], contextWindow: 100000, maxOutputTokens: 8192 }] }]);
+  assert.deepEqual(next.sidekicks, [{ providerId: 'newp', model: 'm1' }], '失效 Sidekick 引用被清理');
+  assert.equal(next.autoByok, true);
+  assert.equal(next.upstreamRetries, 3);
+  assert.notEqual(next.providers[0].id, before.providers[0].id);
+  assert.deepEqual(f.changes, ['importConfig']);
+  assert.ok(!JSON.stringify(state).includes('imported-secret'), '公开状态不泄露密钥');
+  assertValidGraph(next);
+});
+
+test('importConfig rejects invalid payloads without writing', async () => {
+  const f = memory(), before = f.read();
+  for (const config of [null, [], 'x', {}, { providers: 'x' },
+    { providers: [{ id: 'a', name: 'A', baseUrl: 'https://a.invalid/v1', apiFormat: 'openai', models: [{ id: 'x', contextWindow: 10, maxOutputTokens: 20 }] }] }]) {
+    await assert.rejects(f.manager.dispatch('importConfig', { config }), PanelInputError, JSON.stringify(config)?.slice(0, 60));
+  }
+  assert.deepEqual(f.read(), before);
+  assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.changes, []);
 });

@@ -149,7 +149,11 @@ function renderPanel({ nonce, cspSource }) {
   <main id="main" aria-busy="true">
     <header class="page-head">
       <div><h1>Fusion 模型管理</h1><p class="muted page-description">连接供应商、整理模型，并设置 Lead 与 Sidekick 的组合。</p></div>
-      <label class="toggle"><input id="plugin-enabled" type="checkbox" disabled><span>启用插件</span></label>
+      <div class="actions">
+        <button id="export-config" class="secondary" type="button" disabled>导出配置</button>
+        <button id="import-config" class="secondary" type="button" disabled>导入配置</button>
+        <label class="toggle"><input id="plugin-enabled" type="checkbox" disabled><span>启用插件</span></label>
+      </div>
     </header>
     <div id="status" class="status" role="status" aria-live="polite">正在读取配置…</div>
     <details id="setup-card" class="card fusion-card" open aria-labelledby="setup-heading">
@@ -264,8 +268,8 @@ function panelClient(modelSupportsImages, vscode) {
     setBusy(true);
     notice(progress);
     try {
-      await action();
-      notice(success || '已保存。新建会话即可使用。', 'success');
+      const result = await action();
+      notice(typeof result === 'string' && result ? result : success || '已保存。新建会话即可使用。', 'success');
       return true;
     } catch (error) {
       notice(error.message || '操作失败，请重试。', 'error');
@@ -304,6 +308,8 @@ function panelClient(modelSupportsImages, vscode) {
     byId('plugin-enabled').checked = state.enabled !== false;
     byId('plugin-enabled').disabled = false;
     byId('add-provider').disabled = false;
+    byId('export-config').disabled = false;
+    byId('import-config').disabled = false;
     renderProviders();
     renderModels();
     renderFusion();
@@ -1064,6 +1070,8 @@ function panelClient(modelSupportsImages, vscode) {
   }
 
   byId('add-provider').addEventListener('click', () => providerDialog());
+  byId('export-config').addEventListener('click', () => run(() => request('exportConfig'), '正在导出配置…'));
+  byId('import-config').addEventListener('click', () => run(() => request('importConfig'), '正在导入配置…'));
   byId('plugin-enabled').addEventListener('change', event => {
     const value = event.target.checked;
     run(() => request('setEnabled', { enabled: value }), value ? '正在启用插件…' : '正在停用插件…').then(ok => { if (!ok) event.target.checked = !value; });
@@ -1085,7 +1093,7 @@ function panelClient(modelSupportsImages, vscode) {
       if (!operation) return;
       pending.delete(message.id);
       clearTimeout(operation.timeout);
-      if (message.ok) operation.resolve();
+      if (message.ok) operation.resolve(message.note);
       else operation.reject(new Error(typeof message.error === 'string' ? message.error : '操作失败，请重试。'));
     }
   });
