@@ -467,6 +467,8 @@ function buildRoleLists(config = {}, nativeModels = []) {
     });
   }
 
+  // 模型已不存在的历史开关记录仍显示为幽灵行（stale），供面板手动删除；
+  // provider 引用同时会在写入侧被 cleanRoleRefs 自动清掉。
   for (const ref of Array.isArray(config.roleExclusions?.lead) ? config.roleExclusions.lead : []) {
     const key = refKey(ref);
     if (!key || seenLeadKeys.has(key)) continue;
@@ -474,7 +476,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
     leadList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
       native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false,
-      disabled: true, reason: '当前未在可用列表中',
+      disabled: true, stale: true, reason: '当前未在可用列表中',
     });
   }
   for (const ref of Array.isArray(config.roleExclusions?.sidekick) ? config.roleExclusions.sidekick : []) {
@@ -484,7 +486,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
     sidekickList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
       native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false,
-      disabled: true, reason: '当前未在可用列表中',
+      disabled: true, stale: true, reason: '当前未在可用列表中',
     });
   }
   for (const ref of Array.isArray(config.roleInclusions?.lead) ? config.roleInclusions.lead : []) {
@@ -494,7 +496,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
     leadList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
       native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false, explicitIncluded: true,
-      disabled: true, reason: '当前未在可用列表中',
+      disabled: true, stale: true, reason: '当前未在可用列表中',
     });
   }
   for (const ref of Array.isArray(config.roleInclusions?.sidekick) ? config.roleInclusions.sidekick : []) {
@@ -504,7 +506,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
     sidekickList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
       native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false, explicitIncluded: true,
-      disabled: true, reason: '当前未在可用列表中',
+      disabled: true, stale: true, reason: '当前未在可用列表中',
     });
   }
 

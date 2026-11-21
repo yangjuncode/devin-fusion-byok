@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const { buildCatalog: buildSavedCatalog, buildRoleLists, refKey, augmentCatalog, resolveAssignment } = require('../src/catalog.cjs');
 const { withPresets } = require('./fixtures/presets.cjs');
 const buildCatalog = (config, natives = []) => buildSavedCatalog(withPresets(config, natives), natives);
-const { createManager } = require('../src/panel/model.cjs');
+const { createManager, PanelInputError } = require('../src/panel/model.cjs');
 
 const fixture = JSON.parse(fs.readFileSync('test/fixtures/real-picker-0.3.11.json', 'utf8'));
 
@@ -175,7 +175,7 @@ test('empty roles generate no own fusions', () => {
   assert.equal(Object.keys(catalog.fusions).length, 0);
 });
 
-test('exclusions survive temporary unavailability and restart', () => {
+test('refs to deleted models stay listed as deletable stale rows', () => {
   const config = {
     providers: [],
     roleExclusions: {
@@ -188,12 +188,53 @@ test('exclusions survive temporary unavailability and restart', () => {
   assert.ok(ghostLead);
   assert.equal(ghostLead.available, false);
   assert.equal(ghostLead.disabled, true);
-  assert.equal(ghostLead.selected, false);
+  assert.equal(ghostLead.stale, true);
+  assert.equal(ghostLead.reason, '当前未在可用列表中');
 
   const ghostSide = roles.sidekick.find(r => r.ref.nativeUid === 'offline-native');
   assert.ok(ghostSide);
   assert.equal(ghostSide.available, false);
   assert.equal(ghostSide.disabled, true);
+  assert.equal(ghostSide.stale, true);
+});
+
+test('removeRoleRef deletes a stale record from both exclusion and inclusion lists', async () => {
+  let savedConfig = {
+    enabled: true,
+    providers: [],
+    roleExclusions: { lead: [{ providerId: 'gone', model: 'm' }, { nativeUid: 'n1' }], sidekick: [{ providerId: 'gone', model: 'm' }, { nativeUid: 'n2' }] },
+    roleInclusions: { lead: [{ providerId: 'gone', model: 'm' }], sidekick: [] },
+  };
+  const manager = createManager({ read: () => savedConfig, write: c => { savedConfig = c; } });
+  await manager.dispatch('removeRoleRef', { role: 'lead', model: { providerId: 'gone', model: 'm' } });
+  assert.deepEqual(savedConfig.roleExclusions.lead, [{ nativeUid: 'n1' }], '排除记录被删除且不影响其他条目');
+  assert.deepEqual(savedConfig.roleExclusions.sidekick, [{ nativeUid: 'n2' }], '同一事务顺带清掉 sidekick 的失效 provider 引用，native 引用保留');
+  assert.deepEqual(savedConfig.roleInclusions.lead, [], '包含记录同步删除');
+  for (const payload of [{ role: 'x', model: { nativeUid: 'n1' } }, { role: 'lead', model: {} }, { role: 'lead', model: { nativeUid: 'dfbyok-own' } }]) {
+    await assert.rejects(manager.dispatch('removeRoleRef', payload), PanelInputError);
+  }
+});
+
+test('provider role refs are pruned once their model is deleted, but kept while merely disabled', async () => {
+  let savedConfig = {
+    enabled: true,
+    providers: [
+      { id: 'p1', name: 'P1', enabled: true, baseUrl: 'https://p1.test', apiKey: 'k', apiFormat: 'openai', models: [
+        { id: 'm1', label: 'M1', enabled: true }, { id: 'm2', label: 'M2', enabled: false },
+      ] }
+    ],
+    roleExclusions: { lead: [{ providerId: 'p1', model: 'm1' }, { providerId: 'p1', model: 'm2' }, { nativeUid: 'gone-native' }], sidekick: [] },
+    roleInclusions: { lead: [{ providerId: 'p1', model: 'm1' }, { nativeUid: 'gone-native-2' }], sidekick: [] },
+  };
+  const manager = createManager({ read: () => savedConfig, write: c => { savedConfig = c; } });
+  // m2 处于停用状态但仍在供应商中：对应的开关记录保留。
+  await manager.dispatch('setProviderEnabled', { id: 'p1', enabled: true });
+  assert.deepEqual(savedConfig.roleExclusions.lead.map(r => refKey(r)).sort(),
+    [refKey({ providerId: 'p1', model: 'm1' }), refKey({ providerId: 'p1', model: 'm2' }), refKey({ nativeUid: 'gone-native' })].sort());
+  // 删除 m1 后：它的引用被清掉，停用的 m2 与 native 引用保留。
+  await manager.dispatch('updateModels', { providerId: 'p1', changes: [], removeIds: ['m1'] });
+  assert.deepEqual(savedConfig.roleExclusions.lead, [{ providerId: 'p1', model: 'm2' }, { nativeUid: 'gone-native' }]);
+  assert.deepEqual(savedConfig.roleInclusions.lead, [{ nativeUid: 'gone-native-2' }]);
 });
 
 test('manager setRoleModel validates role, rejects malformed/mixed refs, and updates exclusions', async () => {

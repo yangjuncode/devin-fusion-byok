@@ -46,6 +46,22 @@ function cleanSidekicks(config) {
       provider.models.some(model => model.id === sidekick?.model && model.enabled !== false)));
   config.sidekicks = valid;
 }
+// 模型/供应商删除后清掉解析不到的角色开关记录；仅删 provider 引用（模型还在但停用不触发），
+// native 引用始终保留——官方目录波动，条目可能重新出现。
+function cleanRoleRefs(config) {
+  const live = new Set();
+  for (const provider of Array.isArray(config.providers) ? config.providers : [])
+    for (const model of Array.isArray(provider?.models) ? provider.models : [])
+      if (model && typeof model.id === 'string') live.add(JSON.stringify(['provider', provider.id, model.id]));
+  for (const key of ['roleExclusions', 'roleInclusions'])
+    for (const role of ['lead', 'sidekick']) {
+      const list = config[key]?.[role];
+      if (Array.isArray(list)) config[key][role] = list.filter(ref => {
+        const key = refKey(ref);
+        return !!key && (!!ref.nativeUid || live.has(key));
+      });
+    }
+}
 // 导入白名单清洗：外部文件只保留已知字段并逐项校验，未知键与无效条目不进入存储。
 // inferenceServerUrl 属于本机运行态，不随配置迁移；目标机器启用时自行写入。
 function sanitizeImportedConfig(input) {
@@ -415,6 +431,18 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         }
         break;
       }
+      case 'removeRoleRef': {
+        const role = payload.role;
+        if (role !== 'lead' && role !== 'sidekick') fail('角色类型无效。');
+        const key = refKey(payload.model);
+        if (!key) fail('模型标识无效。');
+        for (const kind of ['roleExclusions', 'roleInclusions']) {
+          const entry = { lead: [], sidekick: [], ...(config[kind] || {}) };
+          entry[role] = (Array.isArray(entry[role]) ? entry[role] : []).filter(ref => refKey(ref) !== key);
+          config[kind] = entry;
+        }
+        break;
+      }
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
       case 'setHomeModels': {
         const uids = payload?.uids;
@@ -468,6 +496,7 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       default: fail('不支持的操作。');
     }
     cleanSidekicks(config);
+    cleanRoleRefs(config);
     buildCatalog(config, nativeModels()); // Validate the complete model graph before committing.
     write(config);
     if (type === 'importModels' || type === 'importConfig') pendingImport = undefined;

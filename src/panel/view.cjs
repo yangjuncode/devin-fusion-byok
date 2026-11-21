@@ -682,7 +682,10 @@ function panelClient(modelSupportsImages, vscode) {
       });
       return element('label', { class: 'sidekick-row' },
         element('span', { text: (item.native ? '官方 · ' : '') + item.label }),
-        element('div', { class: 'actions' }, item.available ? toggle : element('span', { class: 'hint', text: item.reason || '不可用' })));
+        element('div', { class: 'actions' }, item.available ? toggle : element('span', { class: 'hint', text: item.reason || '不可用' }),
+          item.stale === true ? element('button', { type: 'button', class: 'quiet', text: '删除',
+            'aria-label': '删除 ' + item.label + ' 的开关记录',
+            onclick: () => run(() => request('removeRoleRef', { role, model: item.ref }), '正在删除开关记录…') }) : null));
     };
     const mainRows = query ? rows : rows.filter(item => !item.native || item.defaultSelected || item.selected || item.explicitIncluded);
     const extraRows = query ? [] : rows.filter(item => item.native && !item.defaultSelected && !item.selected && !item.explicitIncluded);
